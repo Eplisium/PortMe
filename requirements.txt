@@ -1,0 +1,21 @@
+# Advanced Port Scanner Requirements
+# Compatible with Python 3.7+
+
+# Core dependencies (most are built-in to Python)
+# No external dependencies required - uses only Python standard library:
+# - socket (network operations)
+# - threading (multi-threading)
+# - concurrent.futures (thread pool execution)
+# - tkinter (GUI - included with Python on Windows)
+# - argparse (CLI parsing)
+# - ipaddress (IP address validation)
+# - logging (logging functionality)
+# - json (data export)
+# - dataclasses (data structures)
+# - typing (type hints)
+# - platform (system detection)
+
+# Optional: For enhanced functionality (uncomment if needed)
+# requests>=2.25.1        # For HTTP banner grabbing enhancements
+# python-nmap>=0.6.1      # For nmap integration (advanced users)
+# colorama>=0.4.4         # For colored terminal output on Windows
