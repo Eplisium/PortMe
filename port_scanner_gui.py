@@ -609,11 +609,11 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             self.results_text.delete(1.0, tk.END)
         
         # Header with modern styling
-        self.results_text.insert(tk.END, f"\n{'='*90}\n", 'header')
+        self.results_text.insert(tk.END, f"\n{'='*110}\n", 'header')
         self.results_text.insert(tk.END, f"🎯 SCAN RESULTS FOR {host.upper()}\n", 'header')
-        self.results_text.insert(tk.END, f"{'='*90}\n", 'header')
-        self.results_text.insert(tk.END, f"{'PORT':<8} {'STATUS':<12} {'SERVICE':<20} {'BANNER':<40}\n", 'header')
-        self.results_text.insert(tk.END, f"{'-'*90}\n", 'header')
+        self.results_text.insert(tk.END, f"{'='*110}\n", 'header')
+        self.results_text.insert(tk.END, f"{'PORT':<8} {'STATUS':<12} {'SERVICE':<16} {'LADDR':<16} {'ENV':<16} {'PROCESS(PID)':<24} {'PATH':<28} {'BANNER':<24}\n", 'header')
+        self.results_text.insert(tk.END, f"{'-'*110}\n", 'header')
         
         open_count = 0
         closed_count = 0
@@ -621,11 +621,23 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
         
         for result in results:
             if result.status == "OPEN" or (self.show_closed_var.get() and result.status in ["CLOSED", "FILTERED"]):
-                banner = result.banner[:40] + "..." if len(result.banner) > 40 else result.banner
+                banner = result.banner[:24] + "..." if len(result.banner) > 24 else result.banner
+                proc_label = f"{result.process} ({result.pid})" if result.pid else (result.process or "")
+                path = result.process_path or ""
+                path_short = (path[:27] + "…") if path and len(path) > 28 else path
+                addr = result.local_address or ""
+                addr_short = (addr[:15] + "…") if len(addr) > 16 else addr
+                # Environment info (Docker/WSL)
+                env = ""
+                if getattr(result, 'docker_container', ""):
+                    env = f"Docker:{result.docker_container}"
+                elif getattr(result, 'is_wsl', False):
+                    env = f"WSL:{(result.wsl_distro or 'default')}"
+                env_short = (env[:15] + "…") if len(env) > 16 else env
                 
                 # Add status icons for better visual feedback
                 status_icon = "🟢" if result.status == "OPEN" else ("🔴" if result.status == "CLOSED" else "🟡")
-                line = f"{result.port:<8} {status_icon} {result.status:<10} {result.service:<20} {banner:<40}\n"
+                line = f"{result.port:<8} {status_icon} {result.status:<10} {result.service:<16} {addr_short:<16} {env_short:<16} {proc_label:<24} {path_short:<28} {banner:<24}\n"
                 
                 if result.status == "OPEN":
                     self.results_text.insert(tk.END, line, 'open')
@@ -638,7 +650,7 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                     filtered_count += 1
         
         # Enhanced summary with statistics
-        self.results_text.insert(tk.END, f"{'-'*90}\n", 'header')
+        self.results_text.insert(tk.END, f"{'-'*110}\n", 'header')
         summary = f"📊 SCAN SUMMARY:\n"
         summary += f"   • Open Ports: {open_count}\n"
         if self.show_closed_var.get():

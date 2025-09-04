@@ -20,6 +20,8 @@ import logging
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, Callable
 import platform
+import re
+import csv
 
 # Configure logging
 logging.basicConfig(
@@ -41,6 +43,18 @@ class ScanResult:
     service: str = ""
     banner: str = ""
     response_time: float = 0.0
+    pid: Optional[int] = None
+    process: str = ""
+    process_path: str = ""
+    local_address: str = ""
+    # Environment annotations
+    is_wsl: bool = False
+    wsl_distro: str = ""
+    wsl_process: str = ""
+    wsl_path: str = ""
+    docker_container: str = ""
+    docker_image: str = ""
+    docker_container_id: str = ""
 
 class PortScanner:
     """Advanced port scanner with multi-threading support"""
@@ -59,6 +73,8 @@ class PortScanner:
             3000: "Node.js/Development", 3001: "Node.js Alt", 5000: "Flask/Development",
             8000: "Django/Development", 9000: "Development", 27017: "MongoDB"
         }
+        self._system = platform.system().lower()
+        self._local_port_proc_map: Dict[int, Dict[str, str]] = {}
         
     def is_valid_ip(self, ip: str) -> bool:
         """Validate IP address"""
@@ -107,6 +123,353 @@ class PortScanner:
             return banner[:200] if banner else ""  # Limit banner length
         except:
             return ""
+    
+    def is_local_target(self, host: str) -> bool:
+        """Determine if the target host refers to the local machine.
+        Conservative: only treat loopback as local to avoid false positives."""
+        host_l = host.strip().lower()
+        return host_l in {"127.0.0.1", "::1", "localhost"}
+
+    def _parse_local_endpoint(self, endpoint: str) -> Tuple[str, Optional[int]]:
+        """Parse local endpoint like 127.0.0.1:3000 or [::]:3000 into (addr, port)."""
+        ep = endpoint.strip().strip('[]')
+        if ':' not in ep:
+            return ep, None
+        addr, port_str = ep.rsplit(':', 1)
+        try:
+            return addr, int(port_str)
+        except ValueError:
+            return addr, None
+
+    def _windows_pid_info_map(self) -> Dict[int, Dict[str, str]]:
+        """Build PID -> {name, path} mapping on Windows using WMIC or PowerShell, fallback to tasklist."""
+        pid_info: Dict[int, Dict[str, str]] = {}
+        # Try WMIC CSV first
+        try:
+            proc = subprocess.run([
+                "wmic", "process", "get", "ProcessId,Name,ExecutablePath", "/format:csv"
+            ], capture_output=True, text=True, check=False)
+            output = proc.stdout
+            if output:
+                reader = csv.DictReader([line for line in output.splitlines() if line.strip()])
+                for row in reader:
+                    try:
+                        pid = int(row.get('ProcessId') or row.get('ProcessID') or 0)
+                    except Exception:
+                        continue
+                    if pid:
+                        pid_info[pid] = {
+                            'name': row.get('Name', '') or '',
+                            'path': row.get('ExecutablePath', '') or ''
+                        }
+                if pid_info:
+                    return pid_info
+        except FileNotFoundError:
+            pass
+
+        # PowerShell fallback
+        try:
+            ps_cmd = (
+                "Get-Process | Select-Object Id,ProcessName,Path | ConvertTo-Json -Depth 1 -Compress"
+            )
+            proc = subprocess.run([
+                "powershell", "-NoProfile", "-Command", ps_cmd
+            ], capture_output=True, text=True, check=False)
+            if proc.stdout:
+                try:
+                    data = json.loads(proc.stdout)
+                    if isinstance(data, list):
+                        for item in data:
+                            try:
+                                pid = int(item.get('Id'))
+                            except Exception:
+                                continue
+                            if pid:
+                                pid_info[pid] = {
+                                    'name': item.get('ProcessName') or '',
+                                    'path': item.get('Path') or ''
+                                }
+                        if pid_info:
+                            return pid_info
+                except Exception:
+                    pass
+        except FileNotFoundError:
+            pass
+
+        # tasklist final fallback (no path info)
+        try:
+            proc = subprocess.run(["tasklist", "/FO", "CSV"], capture_output=True, text=True, check=False)
+            if proc.stdout:
+                reader = csv.DictReader([line for line in proc.stdout.splitlines() if line.strip()])
+                for row in reader:
+                    try:
+                        pid = int((row.get('PID') or '').strip().strip('"'))
+                    except Exception:
+                        continue
+                    name = (row.get('Image Name') or row.get('Image Name') or '').strip('"')
+                    if pid:
+                        pid_info[pid] = {'name': name, 'path': ''}
+        except Exception:
+            pass
+        return pid_info
+
+    def _build_windows_port_process_map(self) -> Dict[int, Dict[str, str]]:
+        """Build mapping of local port -> {pid, name, path, address} using netstat on Windows."""
+        port_map: Dict[int, Dict[str, str]] = {}
+        try:
+            proc = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, check=False)
+            lines = proc.stdout.splitlines() if proc.stdout else []
+        except Exception:
+            lines = []
+
+        # Parse netstat output
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parts = re.split(r"\s+", line)
+            if not parts:
+                continue
+            proto = parts[0].upper() if parts else ''
+            if proto not in ("TCP", "UDP"):
+                continue
+            try:
+                local_ep = parts[1]
+                pid_str = parts[-1]
+                addr, port = self._parse_local_endpoint(local_ep)
+                pid = int(pid_str)
+            except Exception:
+                continue
+            if port is None:
+                continue
+            # Keep first seen mapping per port
+            port_map.setdefault(port, {
+                'pid': pid,
+                'address': addr,
+            })
+
+        # Enrich with PID info (names and paths)
+        if port_map:
+            pid_info = self._windows_pid_info_map()
+            for p, info in list(port_map.items()):
+                pid = info.get('pid')
+                meta = pid_info.get(pid, {}) if isinstance(pid, int) else {}
+                info['name'] = meta.get('name', '')
+                info['path'] = meta.get('path', '')
+        return port_map
+
+    def _detect_wsl_default_distro(self) -> str:
+        """Detect the default WSL distro name on Windows (best-effort)."""
+        try:
+            proc = subprocess.run(["wsl.exe", "-l", "-v"], capture_output=True, text=True, check=False)
+            out = proc.stdout.splitlines()
+            # Look for line starting with '*'
+            for line in out:
+                if line.strip().startswith('*'):
+                    # Format: * Ubuntu-22.04           Running         2
+                    return line.strip('* ').split()[0]
+            # Fallback: find first non-header line
+            for line in out:
+                if line.lower().startswith('name'):
+                    continue
+                if line.strip():
+                    return line.split()[0]
+        except Exception:
+            pass
+        return ""
+
+    def _build_wsl_port_process_map(self) -> Dict[int, Dict[str, str]]:
+        """From Windows, query the default WSL distro for its listening ports and owning processes."""
+        port_map: Dict[int, Dict[str, str]] = {}
+        try:
+            cmd = (
+                "command -v ss >/dev/null 2>&1 && ss -tulpn || netstat -tulpn"
+            )
+            proc = subprocess.run(["wsl.exe", "-e", "sh", "-lc", cmd], capture_output=True, text=True, check=False)
+            lines = proc.stdout.splitlines() if proc.stdout else []
+        except Exception:
+            lines = []
+        for line in lines:
+            if not line or line.lower().startswith(('netid', 'proto', 'state')):
+                continue
+            parts = re.split(r"\s+", line.strip())
+            if len(parts) < 5:
+                continue
+            local_ep = parts[4]
+            addr, port = self._parse_local_endpoint(local_ep)
+            if port is None:
+                continue
+            m = re.search(r"users:\(\(\"([^\"]+)\",pid=(\d+)", line)
+            pid = None
+            name = ''
+            if m:
+                name = m.group(1)
+                try:
+                    pid = int(m.group(2))
+                except Exception:
+                    pid = None
+            info: Dict[str, str] = {'address': addr}
+            if pid is not None:
+                info['pid'] = pid  # type: ignore
+                info['name'] = name
+                # Resolve path inside WSL
+                try:
+                    p2 = subprocess.run(["wsl.exe", "-e", "sh", "-lc", f"readlink -f /proc/{pid}/exe || true"], capture_output=True, text=True, check=False)
+                    exe_path = (p2.stdout or '').strip()
+                except Exception:
+                    exe_path = ''
+                info['path'] = exe_path
+            if port not in port_map:
+                port_map[port] = info
+        return port_map
+
+    def _build_docker_host_port_map(self) -> Dict[int, Dict[str, str]]:
+        """Map host listen ports -> docker container metadata (id, name, image) if Docker is available."""
+        mapping: Dict[int, Dict[str, str]] = {}
+        cmds = [
+            ["docker", "ps", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}"],
+        ]
+        for cmd in cmds:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if proc.returncode != 0 or not proc.stdout:
+                    continue
+                for line in proc.stdout.splitlines():
+                    parts = line.split('\t')
+                    if len(parts) != 4:
+                        continue
+                    cid, name, image, ports = parts
+                    # Extract host ports from Ports column
+                    # Examples: "0.0.0.0:3000->3000/tcp, :::3000->3000/tcp" or "127.0.0.1:9229->9229/tcp"
+                    for entry in ports.split(','):
+                        entry = entry.strip()
+                        m = re.search(r":(\d+)->", entry)
+                        if not m:
+                            continue
+                        try:
+                            host_port = int(m.group(1))
+                        except Exception:
+                            continue
+                        mapping[host_port] = {"id": cid, "name": name, "image": image}
+                if mapping:
+                    return mapping
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        return mapping
+
+    def _build_linux_port_process_map(self) -> Dict[int, Dict[str, str]]:
+        """Build mapping of local port -> {pid, name, path, address} on Linux/WSL using ss or netstat."""
+        port_map: Dict[int, Dict[str, str]] = {}
+        lines: List[str] = []
+        # Try ss first
+        try:
+            proc = subprocess.run(["ss", "-tulpn"], capture_output=True, text=True, check=False)
+            if proc.stdout:
+                lines = proc.stdout.splitlines()
+        except FileNotFoundError:
+            lines = []
+        # Fallback to netstat if needed
+        if not lines:
+            try:
+                proc = subprocess.run(["netstat", "-tulpn"], capture_output=True, text=True, check=False)
+                if proc.stdout:
+                    lines = proc.stdout.splitlines()
+            except Exception:
+                lines = []
+        for line in lines:
+            if not line or line.lower().startswith(('netid', 'proto', 'state')):
+                continue
+            parts = re.split(r"\s+", line.strip())
+            if len(parts) < 5:
+                continue
+            local_ep = parts[4]
+            addr, port = self._parse_local_endpoint(local_ep)
+            if port is None:
+                continue
+            # Extract pid and process name from users:(())
+            m = re.search(r"users:\(\(\"([^\"]+)\",pid=(\d+)", line)
+            pid = None
+            name = ''
+            if m:
+                name = m.group(1)
+                try:
+                    pid = int(m.group(2))
+                except Exception:
+                    pid = None
+            info: Dict[str, str] = {'address': addr}
+            if pid is not None:
+                info['pid'] = pid  # type: ignore
+                info['name'] = name
+                # Try to resolve executable path
+                try:
+                    exe_path = os.readlink(f"/proc/{pid}/exe")
+                except Exception:
+                    exe_path = ''
+                info['path'] = exe_path
+            # Keep first seen for the port
+            if port not in port_map:
+                port_map[port] = info
+        return port_map
+
+    def build_local_port_process_map(self) -> Dict[int, Dict[str, str]]:
+        """Public helper to build local port->process mapping based on OS."""
+        try:
+            if self._system == 'windows':
+                return self._build_windows_port_process_map()
+            else:
+                return self._build_linux_port_process_map()
+        except Exception as e:
+            logger.debug(f"Failed to build local port/process map: {e}")
+            return {}
+
+    def _enrich_with_process_info(self, result: ScanResult, port_proc_map: Dict[int, Dict[str, str]]):
+        """Enrich a ScanResult with local process info if available."""
+        if result.status != "OPEN":
+            return
+        info = port_proc_map.get(result.port)
+        if not info:
+            return
+        try:
+            result.pid = int(info.get('pid')) if info.get('pid') is not None else None
+        except Exception:
+            result.pid = None
+        result.process = str(info.get('name') or '')
+        result.process_path = str(info.get('path') or '')
+        result.local_address = str(info.get('address') or '')
+
+    def _enrich_with_envs(self, result: ScanResult, wsl_map: Dict[int, Dict[str, str]], docker_map: Dict[int, Dict[str, str]], wsl_distro: str):
+        """Add WSL and Docker annotations when applicable."""
+        if result.status != "OPEN":
+            return
+        # Docker detection (host port mapping)
+        d = docker_map.get(result.port)
+        if d:
+            result.docker_container_id = d.get('id', '')
+            result.docker_container = d.get('name', '')
+            result.docker_image = d.get('image', '')
+        # WSL fallback for Windows localhost when Windows process is generic or empty
+        w = wsl_map.get(result.port)
+        needs_wsl = False
+        if self._system == 'windows' and self.is_local_target(result.host):
+            if not result.process or result.process.lower() in {"system", "system idle process", "vmmem", "vmmemwsl", "com.docker.backend", "docker desktop backend"}:
+                needs_wsl = True
+        if w and needs_wsl:
+            # Prefer WSL process details
+            result.is_wsl = True
+            result.wsl_distro = wsl_distro
+            result.wsl_process = str(w.get('name') or '')
+            result.wsl_path = str(w.get('path') or '')
+            # Overwrite general process fields with WSL ones for display clarity
+            try:
+                result.pid = int(w.get('pid')) if w.get('pid') is not None else result.pid
+            except Exception:
+                pass
+            result.process = result.wsl_process or result.process
+            result.process_path = result.wsl_path or result.process_path
+            if not result.local_address:
+                result.local_address = str(w.get('address') or '')
             
     def scan_port(self, host: str, port: int) -> ScanResult:
         """Scan a single port"""
@@ -144,7 +507,20 @@ class PortScanner:
                 logger.error(f"Could not resolve hostname: {host}")
                 return results
             host = resolved_ip
-            
+        
+        # If target is local, prepare a port->process map to enrich OPEN results
+        port_proc_map: Dict[int, Dict[str, str]] = {}
+        docker_map: Dict[int, Dict[str, str]] = {}
+        wsl_map: Dict[int, Dict[str, str]] = {}
+        wsl_distro = ""
+        if self.is_local_target(host):
+            port_proc_map = self.build_local_port_process_map()
+            # Build environment maps
+            docker_map = self._build_docker_host_port_map()
+            if self._system == 'windows':
+                wsl_map = self._build_wsl_port_process_map()
+                wsl_distro = self._detect_wsl_default_distro()
+
         logger.info(f"Scanning {len(ports)} ports on {host}")
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -157,6 +533,12 @@ class PortScanner:
             completed = 0
             for future in as_completed(future_to_port):
                 result = future.result()
+                # Enrich with process info for local scans
+                if port_proc_map:
+                    self._enrich_with_process_info(result, port_proc_map)
+                # Add WSL and Docker annotations
+                if docker_map or wsl_map:
+                    self._enrich_with_envs(result, wsl_map, docker_map, wsl_distro)
                 results.append(result)
                 completed += 1
                 
@@ -230,18 +612,29 @@ class PortScanner:
         if not results:
             print("No results to display")
             return
-            
+        
         print(f"\n{'='*80}")
         print(f"SCAN RESULTS FOR {results[0].host}")
         print(f"{'='*80}")
-        print(f"{'PORT':<8} {'STATUS':<12} {'SERVICE':<20} {'BANNER':<30}")
+        print(f"{'PORT':<8} {'STATUS':<12} {'SERVICE':<14} {'LADDR':<16} {'ENV':<16} {'PROCESS(PID)':<24} {'PATH':<28} {'BANNER':<24}")
         print(f"{'-'*80}")
         
         for result in results:
             if result.status == "OPEN" or (show_closed and result.status in ["CLOSED", "FILTERED"]):
-                banner = result.banner[:30] + "..." if len(result.banner) > 30 else result.banner
-                print(f"{result.port:<8} {result.status:<12} {result.service:<20} {banner:<30}")
-                
+                banner = result.banner[:24] + "..." if len(result.banner) > 24 else result.banner
+                proc_label = f"{result.process} ({result.pid})" if result.pid else (result.process or "")
+                path = result.process_path
+                path_short = (path[:27] + "…") if path and len(path) > 28 else (path or "")
+                addr = result.local_address or ""
+                addr_short = (addr[:15] + "…") if len(addr) > 16 else addr
+                env = ""
+                if result.docker_container:
+                    env = f"Docker:{result.docker_container}"
+                elif result.is_wsl:
+                    env = f"WSL:{result.wsl_distro or 'default'}"
+                env_short = (env[:15] + "…") if len(env) > 16 else env
+                print(f"{result.port:<8} {result.status:<12} {result.service:<14} {addr_short:<16} {env_short:<16} {proc_label:<24} {path_short:<28} {banner:<24}")
+        
         open_count = sum(1 for r in results if r.status == "OPEN")
         print(f"\nSummary: {open_count} open ports found out of {len(results)} scanned")
         
@@ -261,7 +654,18 @@ class PortScanner:
                         "status": result.status,
                         "service": result.service,
                         "banner": result.banner,
-                        "response_time": result.response_time
+                        "response_time": result.response_time,
+                        "pid": result.pid,
+                        "process": result.process,
+                        "process_path": result.process_path,
+                        "local_address": result.local_address,
+                        "is_wsl": result.is_wsl,
+                        "wsl_distro": result.wsl_distro,
+                        "wsl_process": result.wsl_process,
+                        "wsl_path": result.wsl_path,
+                        "docker_container": result.docker_container,
+                        "docker_image": result.docker_image,
+                        "docker_container_id": result.docker_container_id
                     })
                     
                 with open(filename, 'w') as f:
@@ -269,10 +673,19 @@ class PortScanner:
                     
             elif format.lower() == "csv":
                 with open(filename, 'w') as f:
-                    f.write("Host,Port,Status,Service,Banner,ResponseTime\n")
+                    f.write("Host,Port,Status,Service,Banner,ResponseTime,PID,Process,ProcessPath,LocalAddress,IsWSL,WSLDistro,WSLProcess,WSLPath,DockerContainer,DockerImage,DockerContainerID\n")
                     for result in self.results:
                         banner_escaped = result.banner.replace('"', '""').replace('\n', ' ')
-                        f.write(f'{result.host},{result.port},{result.status},{result.service},"{banner_escaped}",{result.response_time}\n')
+                        proc_path = (result.process_path or '').replace('"', '""')
+                        proc_name = (result.process or '').replace('"', '""')
+                        local_addr = (result.local_address or '').replace('"', '""')
+                        wslp = (result.wsl_path or '').replace('"', '""')
+                        wsln = (result.wsl_process or '').replace('"', '""')
+                        wsld = (result.wsl_distro or '').replace('"', '""')
+                        dname = (result.docker_container or '').replace('"', '""')
+                        dimg = (result.docker_image or '').replace('"', '""')
+                        dcid = (result.docker_container_id or '').replace('"', '""')
+                        f.write(f'{result.host},{result.port},{result.status},{result.service},"{banner_escaped}",{result.response_time},{result.pid or ""},"{proc_name}","{proc_path}","{local_addr}",{str(result.is_wsl).lower()},"{wsld}","{wsln}","{wslp}","{dname}","{dimg}","{dcid}"\n')
                         
             logger.info(f"Results exported to {filename}")
             
