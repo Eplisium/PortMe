@@ -6,6 +6,7 @@ A user-friendly graphical interface for the advanced port scanner
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import font as tkfont
 import threading
 import queue
 from port_scanner import PortScanner, ScanResult
@@ -187,6 +188,44 @@ class PortScannerGUI:
                                  fg=self.colors['text_light'],
                                  bg=self.colors['background'])
         subtitle_label.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Right-aligned header area: message + cursive signature
+        right_header = tk.Frame(header_frame, bg=self.colors['background'])
+        right_header.pack(side=tk.RIGHT)
+        
+        made_with_label = tk.Label(
+            right_header,
+            text="Made with 💜 for Windows and WSL users.",
+            font=('Segoe UI', 9),
+            fg=self.colors['text_light'],
+            bg=self.colors['background']
+        )
+        made_with_label.pack(anchor=tk.E)
+        
+        # Pick a nice cursive/script font available on Windows; fall back gracefully
+        available_fonts = {name.lower(): name for name in tkfont.families()}
+        script_candidates = [
+            "Segoe Script", "Lucida Handwriting", "Brush Script MT",
+            "Edwardian Script ITC", "Gabriola", "Kunstler Script",
+            "Freestyle Script"
+        ]
+        script_font_name = None
+        for candidate in script_candidates:
+            if candidate.lower() in available_fonts:
+                script_font_name = available_fonts[candidate.lower()]
+                break
+        if not script_font_name:
+            script_font_name = "Segoe UI"
+        script_font = (script_font_name, 14, 'italic')
+        
+        signature_label = tk.Label(
+            right_header,
+            text="Devd by Eplisium",
+            font=script_font,
+            fg=self.colors['primary_dark'],
+            bg=self.colors['background']
+        )
+        signature_label.pack(anchor=tk.E)
         
         # Main content frame with responsive sizing
         content_frame = tk.Frame(main_container, bg=self.colors['background'])
@@ -411,8 +450,23 @@ class PortScannerGUI:
                                                      selectforeground='white',
                                                      relief='flat',
                                                      bd=0,
-                                                     wrap=tk.WORD)
+                                                     wrap=tk.NONE)
+        # Add horizontal scrollbar for wide content
+        h_scrollbar = ttk.Scrollbar(results_container, orient="horizontal")
+        # Link the scrollbar and the text widget for horizontal scrolling
+        self.results_text.configure(xscrollcommand=h_scrollbar.set)
+        h_scrollbar.config(command=self.results_text.xview)
         self.results_text.pack(fill=tk.BOTH, expand=True)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Improve UX: hold Shift and use mouse wheel to scroll horizontally
+        def _on_shift_mousewheel(event):
+            try:
+                self.results_text.xview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+            return "break"
+        self.results_text.bind("<Shift-MouseWheel>", _on_shift_mousewheel)
         
         # Configure enhanced text tags for colored output
         self.results_text.tag_configure('open', 
