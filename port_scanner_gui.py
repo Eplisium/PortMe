@@ -356,6 +356,10 @@ class PortScannerGUI:
         ttk.Checkbutton(options_frame, text="Show Closed/Filtered Ports", 
                        variable=self.show_closed_var, style='Modern.TCheckbutton').pack(anchor=tk.W, pady=(5, 0))
         
+        self.ping_sweep_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Enable Ping Sweep (Network Scans)", 
+                       variable=self.ping_sweep_var, style='Modern.TCheckbutton').pack(anchor=tk.W, pady=(5, 0))
+        
         # Control buttons section
         controls_section = tk.Frame(left_inner, bg=self.colors['surface'])
         controls_section.pack(fill=tk.X, pady=(0, 20))
@@ -598,7 +602,8 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                 self.queue.put(("progress", completed, total))
 
             if '/' in host:  # Network scan
-                results = self.scanner.scan_network_range(host, ports, progress_callback=progress_cb)
+                ping_first = self.ping_sweep_var.get()
+                results = self.scanner.scan_network_range(host, ports, ping_first=ping_first, progress_callback=progress_cb)
                 for host_ip, host_results in results.items():
                     self.queue.put(("results", host_ip, host_results))
             else:  # Single host scan

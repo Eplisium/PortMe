@@ -561,9 +561,70 @@ class PortScanner:
         self.results.extend(results)
         return results
         
-    def scan_network_range(self, network: str, ports: List[int], progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> Dict[str, List[ScanResult]]:
+    def ping_sweep(self, network: str) -> List[str]:
+        """Perform ICMP ping sweep to identify live hosts in a network range
+        
+        Args:
+            network: Network range in CIDR format (e.g., "192.168.1.0/24")
+            
+        Returns:
+            List of live host IP addresses
+        """
+        try:
+            network_obj = ipaddress.ip_network(network, strict=False)
+        except ValueError as e:
+            logger.error(f"Invalid network range: {network} - {e}")
+            return []
+        
+        logger.info(f"Starting ping sweep on {network}")
+        live_hosts = []
+        
+        def ping_host(host_ip: str) -> Optional[str]:
+            """Ping a single host and return IP if alive"""
+            try:
+                # Determine ping command based on OS
+                if self._system == 'windows':
+                    cmd = ["ping", "-n", "1", "-w", "1000", host_ip]
+                else:
+                    cmd = ["ping", "-c", "1", "-W", "1", host_ip]
+                
+                # Run ping command
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                
+                # Check if ping was successful
+                if result.returncode == 0:
+                    return host_ip
+                return None
+                
+            except (subprocess.TimeoutExpired, Exception) as e:
+                logger.debug(f"Ping failed for {host_ip}: {e}")
+                return None
+        
+        # Multi-threaded ping sweep
+        hosts = list(network_obj.hosts())
+        logger.info(f"Pinging {len(hosts)} hosts...")
+        
+        with ThreadPoolExecutor(max_workers=min(50, len(hosts))) as executor:
+            future_to_host = {executor.submit(ping_host, str(host)): str(host) for host in hosts}
+            
+            for future in as_completed(future_to_host):
+                result = future.result()
+                if result:
+                    live_hosts.append(result)
+        
+        logger.info(f"Found {len(live_hosts)} live hosts out of {len(hosts)} total")
+        return sorted(live_hosts, key=lambda x: ipaddress.ip_address(x))
+    
+    def scan_network_range(self, network: str, ports: List[int], ping_first: bool = True, progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> Dict[str, List[ScanResult]]:
         """Scan ports across a network range. If a progress_callback is provided, it will
-        be invoked for each completed port across all hosts with (completed, total, result)."""
+        be invoked for each completed port across all hosts with (completed, total, result).
+        
+        Args:
+            network: Network range in CIDR format (e.g., "192.168.1.0/24")
+            ports: List of port numbers to scan
+            ping_first: If True, perform ping sweep first to identify live hosts
+            progress_callback: Optional callback for progress updates
+        """
         try:
             network_obj = ipaddress.ip_network(network, strict=False)
         except ValueError as e:
@@ -571,9 +632,20 @@ class PortScanner:
             return {}
             
         all_results = {}
+        
+        # Determine which hosts to scan
+        if ping_first:
+            logger.info("Performing ping sweep to identify live hosts...")
+            hosts_to_scan = self.ping_sweep(network)
+            if not hosts_to_scan:
+                logger.warning("No live hosts found during ping sweep")
+                return {}
+        else:
+            logger.info("Skipping ping sweep as requested")
+            hosts_to_scan = [str(host) for host in network_obj.hosts()]
 
         # Prepare aggregated progress if callback provided
-        total_hosts = sum(1 for _ in network_obj.hosts())
+        total_hosts = len(hosts_to_scan)
         total_ports = len(ports)
         grand_total = total_hosts * total_ports if total_ports > 0 else 0
         completed_counter = 0
@@ -588,8 +660,7 @@ class PortScanner:
                 except Exception:
                     pass
         
-        for host in network_obj.hosts():
-            host_str = str(host)
+        for host_str in hosts_to_scan:
             logger.info(f"Scanning host: {host_str}")
             results = self.scan_host_ports(host_str, ports, progress_callback=_wrap_progress_callback)
             open_ports = [r for r in results if r.status == "OPEN"]
@@ -741,6 +812,8 @@ Examples:
                        help='Output file (supports .json and .csv)')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
+    parser.add_argument('--no-ping', action='store_true',
+                       help='Skip ping sweep for network scans (scan all hosts)')
     
     args = parser.parse_args()
     
@@ -783,7 +856,8 @@ Examples:
     try:
         if '/' in args.host:  # Network range
             logger.info(f"Scanning network range: {args.host}")
-            all_results = scanner.scan_network_range(args.host, ports_to_scan)
+            ping_first = not args.no_ping  # Invert the flag
+            all_results = scanner.scan_network_range(args.host, ports_to_scan, ping_first=ping_first)
             
             for host, results in all_results.items():
                 scanner.print_results(results, args.show_closed)
