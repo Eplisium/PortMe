@@ -8,7 +8,7 @@ A comprehensive, cross-platform port scanning tool designed for Windows and WSL 
 - **Service detection** and banner grabbing
 - **Cross-platform** compatibility (Windows & WSL)
 - **GUI and CLI interfaces** for different use cases
-- **Network range scanning** (CIDR notation support)
+- **Network range scanning** (CIDR notation support) with bounded host concurrency
 - **Export results** to JSON/CSV formats
 - **Real-time progress tracking**
 - **Comprehensive logging**
@@ -62,7 +62,7 @@ python port_scanner.py -H 192.168.1.1 -p 80,443,22,3000
 # Scan port range
 python port_scanner.py -H example.com -p 1-1000
 
-# Quick check for your development server (port 3000)
+# Quick check for your development server (port 3000) with banner grabbing
 python port_scanner.py -H localhost -p 3000 --banner
 
 # Scan with custom timeout and threading
@@ -71,13 +71,13 @@ python port_scanner.py -H 127.0.0.1 -p 3000-3010 --timeout 2 -w 50
 
 #### Advanced Usage
 ```bash
-# Scan network range
-python port_scanner.py -H 192.168.1.0/24 -p 22,80,443
+# Scan network range with bounded parallelism across hosts (16 by default)
+python port_scanner.py -H 192.168.1.0/24 -p 22,80,443 --host-concurrency 16
 
 # Export results to JSON
 python port_scanner.py -H localhost --common -o results.json
 
-# Verbose logging with banner grabbing
+# Verbose logging with banner grabbing (banners only fetched when --banner is set)
 python port_scanner.py -H target.com -p 80,443,8080 --banner -v
 
 # Show closed ports in results
@@ -198,10 +198,20 @@ Summary: 3 open ports found out of 4 scanned
 | `--common` | Scan common ports only | False |
 | `-t, --timeout` | Socket timeout (seconds) | 1.0 |
 | `-w, --workers` | Max worker threads | 100 |
-| `--banner` | Enable banner grabbing | False |
+| `--banner` | Enable banner grabbing (banners are only fetched when enabled) | False |
+| `--host-concurrency` | Max concurrent host scans for network ranges | 16 |
 | `--show-closed` | Show closed ports | False |
 | `-o, --output` | Export file | None |
 | `-v, --verbose` | Verbose logging | False |
+
+## ✅ Behavior Notes
+
+- Banners are fetched only when `--banner` is specified (CLI) or the "Enable Banner Grabbing" checkbox is checked (GUI). This avoids unnecessary I/O when disabled.
+- The GUI features a real Stop Scan button that cooperatively cancels ongoing scans. Scans halt shortly after pressing stop and the UI returns to an idle state.
+- Network range scans are parallelized across hosts with a bounded level of concurrency to avoid overwhelming the system. Use `--host-concurrency` to tune.
+- Total concurrency during network scans is approximately `host_concurrency * workers` (per-host threads). Choose balanced values to keep CPU and the target stable.
+- macOS (Darwin) ping sweep uses `-W` in milliseconds; Linux uses seconds; Windows uses `-w` in milliseconds. If `ping` is not available, hosts are treated as offline without crashing.
+- CSV exports open files with `newline=''` to prevent extra blank lines on Windows.
 
 ## 🔐 Security Notes
 

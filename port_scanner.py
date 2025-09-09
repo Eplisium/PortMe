@@ -59,9 +59,11 @@ class ScanResult:
 class PortScanner:
     """Advanced port scanner with multi-threading support"""
     
-    def __init__(self, timeout: float = 1.0, max_workers: int = 100):
+    def __init__(self, timeout: float = 1.0, max_workers: int = 100, enable_banner: bool = False, host_concurrency: int = 16):
         self.timeout = timeout
         self.max_workers = max_workers
+        self.enable_banner = enable_banner
+        self.host_concurrency = host_concurrency
         self.results: List[ScanResult] = []
         self.common_ports = {
             20: "FTP Data", 21: "FTP Control", 22: "SSH", 23: "Telnet",
@@ -75,6 +77,19 @@ class PortScanner:
         }
         self._system = platform.system().lower()
         self._local_port_proc_map: Dict[int, Dict[str, str]] = {}
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation of in-flight scans."""
+        self._cancel_event.set()
+
+    def reset_cancel(self) -> None:
+        """Clear the cancellation event before starting a new scan."""
+        self._cancel_event.clear()
+
+    def is_cancelled(self) -> bool:
+        """Check whether a cancellation has been requested."""
+        return self._cancel_event.is_set()
         
     def is_valid_ip(self, ip: str) -> bool:
         """Validate IP address"""
@@ -206,7 +221,7 @@ class PortScanner:
                         pid = int((row.get('PID') or '').strip().strip('"'))
                     except Exception:
                         continue
-                    name = (row.get('Image Name') or row.get('Image Name') or '').strip('"')
+                    name = (row.get('Image Name') or row.get('ImageName') or '').strip('"')
                     if pid:
                         pid_info[pid] = {'name': name, 'path': ''}
         except Exception:
@@ -475,6 +490,10 @@ class PortScanner:
         """Scan a single port"""
         start_time = time.time()
         
+        # Early out if cancelled; avoid any network I/O
+        if self._cancel_event.is_set():
+            return ScanResult(host, port, "CANCELLED", "", "", 0.0)
+
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.timeout)
@@ -483,7 +502,7 @@ class PortScanner:
             
             if result == 0:
                 service = self.get_service_name(port)
-                banner = self.grab_banner(host, port)
+                banner = self.grab_banner(host, port) if self.enable_banner else ""
                 sock.close()
                 return ScanResult(host, port, "OPEN", service, banner, response_time)
             else:
@@ -500,6 +519,9 @@ class PortScanner:
         """Scan multiple ports on a single host"""
         results = []
         
+        if self._cancel_event.is_set():
+            return results
+
         # Resolve hostname if needed
         if not self.is_valid_ip(host):
             resolved_ip = self.resolve_hostname(host)
@@ -524,38 +546,59 @@ class PortScanner:
         logger.info(f"Scanning {len(ports)} ports on {host}")
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all port scanning tasks
-            future_to_port = {
-                executor.submit(self.scan_port, host, port): port 
-                for port in ports
-            }
-            
+            future_to_port: Dict = {}
+            # Submit tasks cooperatively, stop if cancelled
+            for p in ports:
+                if self._cancel_event.is_set():
+                    break
+                future_to_port[executor.submit(self.scan_port, host, p)] = p
+
             completed = 0
-            for future in as_completed(future_to_port):
-                result = future.result()
-                # Enrich with process info for local scans
-                if port_proc_map:
-                    self._enrich_with_process_info(result, port_proc_map)
-                # Add WSL and Docker annotations
-                if docker_map or wsl_map:
-                    self._enrich_with_envs(result, wsl_map, docker_map, wsl_distro)
-                results.append(result)
-                completed += 1
-                
-                if show_progress and completed % 10 == 0:
-                    print(f"Progress: {completed}/{len(ports)} ports scanned", end='\r')
-                
-                # Notify progress callback, if provided
-                if progress_callback is not None:
-                    try:
-                        progress_callback(completed, len(ports), result)
-                    except Exception:
-                        # Ensure scanning continues even if callback has issues
-                        pass
-                    
-        if show_progress:
-            print()  # New line after progress
-            
+            try:
+                for future in as_completed(future_to_port):
+                    if self._cancel_event.is_set():
+                        # Cancel any pending futures and break
+                        try:
+                            executor.shutdown(cancel_futures=True)  # type: ignore[arg-type]
+                        except TypeError:
+                            # Python < 3.9 compatibility: fall back to manual cancel
+                            for f in future_to_port:
+                                if not f.done():
+                                    f.cancel()
+                        break
+
+                    result = future.result()
+                    # Enrich with process info for local scans
+                    if port_proc_map:
+                        self._enrich_with_process_info(result, port_proc_map)
+                    # Add WSL and Docker annotations
+                    if docker_map or wsl_map:
+                        self._enrich_with_envs(result, wsl_map, docker_map, wsl_distro)
+                    results.append(result)
+                    completed += 1
+
+                    # Only print progress if explicitly requested, no callback provided, and not cancelled
+                    if show_progress and progress_callback is None and completed % 10 == 0 and not self._cancel_event.is_set():
+                        print(f"Progress: {completed}/{len(ports)} ports scanned", end='\r')
+
+                    # Notify progress callback, if provided and not cancelled
+                    if progress_callback is not None and not self._cancel_event.is_set():
+                        try:
+                            progress_callback(completed, len(ports), result)
+                        except Exception:
+                            # Ensure scanning continues even if callback has issues
+                            pass
+            except Exception:
+                # Ensure executor is asked to cancel pending futures on unexpected error
+                try:
+                    executor.shutdown(cancel_futures=True)  # type: ignore[arg-type]
+                except TypeError:
+                    pass
+                raise
+
+        if show_progress and progress_callback is None and not self._cancel_event.is_set():
+            print()  # New line after progress when we own console output
+        
         # Sort results by port number
         results.sort(key=lambda x: x.port)
         self.results.extend(results)
@@ -585,7 +628,11 @@ class PortScanner:
                 # Determine ping command based on OS
                 if self._system == 'windows':
                     cmd = ["ping", "-n", "1", "-w", "1000", host_ip]
+                elif self._system == 'darwin':
+                    # On macOS, -W is milliseconds
+                    cmd = ["ping", "-c", "1", "-W", "1000", host_ip]
                 else:
+                    # Linux: -W is seconds
                     cmd = ["ping", "-c", "1", "-W", "1", host_ip]
                 
                 # Run ping command
@@ -596,6 +643,9 @@ class PortScanner:
                     return host_ip
                 return None
                 
+            except FileNotFoundError as e:
+                logger.debug(f"Ping unavailable on system for {host_ip}: {e}")
+                return None
             except (subprocess.TimeoutExpired, Exception) as e:
                 logger.debug(f"Ping failed for {host_ip}: {e}")
                 return None
@@ -616,8 +666,9 @@ class PortScanner:
         return sorted(live_hosts, key=lambda x: ipaddress.ip_address(x))
     
     def scan_network_range(self, network: str, ports: List[int], ping_first: bool = True, progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> Dict[str, List[ScanResult]]:
-        """Scan ports across a network range. If a progress_callback is provided, it will
-        be invoked for each completed port across all hosts with (completed, total, result).
+        """Scan ports across a network range with bounded host-level concurrency.
+        If a progress_callback is provided, it will be invoked for each completed
+        port across all hosts with (completed, total, result).
         
         Args:
             network: Network range in CIDR format (e.g., "192.168.1.0/24")
@@ -630,9 +681,9 @@ class PortScanner:
         except ValueError as e:
             logger.error(f"Invalid network range: {network} - {e}")
             return {}
-            
-        all_results = {}
-        
+
+        all_results: Dict[str, List[ScanResult]] = {}
+
         # Determine which hosts to scan
         if ping_first:
             logger.info("Performing ping sweep to identify live hosts...")
@@ -652,6 +703,8 @@ class PortScanner:
 
         def _wrap_progress_callback(_completed_for_host: int, _total_for_host: int, result: ScanResult):
             nonlocal completed_counter
+            if self._cancel_event.is_set():
+                return
             # Increment global counter for each finished port
             completed_counter += 1
             if progress_callback is not None and grand_total > 0:
@@ -659,15 +712,42 @@ class PortScanner:
                     progress_callback(completed_counter, grand_total, result)
                 except Exception:
                     pass
-        
-        for host_str in hosts_to_scan:
-            logger.info(f"Scanning host: {host_str}")
-            results = self.scan_host_ports(host_str, ports, progress_callback=_wrap_progress_callback)
-            open_ports = [r for r in results if r.status == "OPEN"]
-            
-            if open_ports:  # Only store hosts with open ports
-                all_results[host_str] = results
-                
+
+        # Host-level parallelism with bounded concurrency
+        host_futures = {}
+        with ThreadPoolExecutor(max_workers=self.host_concurrency) as host_executor:
+            for host_str in hosts_to_scan:
+                if self._cancel_event.is_set():
+                    break
+                host_futures[host_executor.submit(self.scan_host_ports, host_str, ports, False, _wrap_progress_callback)] = host_str
+
+            try:
+                for fut in as_completed(host_futures):
+                    if self._cancel_event.is_set():
+                        # Cancel pending host scans and break
+                        try:
+                            host_executor.shutdown(cancel_futures=True)  # type: ignore[arg-type]
+                        except TypeError:
+                            for f in host_futures:
+                                if not f.done():
+                                    f.cancel()
+                        break
+                    host = host_futures[fut]
+                    try:
+                        results = fut.result()
+                    except Exception as e:
+                        logger.debug(f"Host scan failed for {host}: {e}")
+                        results = []
+                    open_ports = [r for r in results if r.status == "OPEN"]
+                    if open_ports:
+                        all_results[host] = results
+            except Exception:
+                try:
+                    host_executor.shutdown(cancel_futures=True)  # type: ignore[arg-type]
+                except TypeError:
+                    pass
+                raise
+
         return all_results
         
     def get_common_ports(self) -> List[int]:
@@ -743,7 +823,7 @@ class PortScanner:
                     json.dump(data, f, indent=2)
                     
             elif format.lower() == "csv":
-                with open(filename, 'w') as f:
+                with open(filename, 'w', newline='') as f:
                     f.write("Host,Port,Status,Service,Banner,ResponseTime,PID,Process,ProcessPath,LocalAddress,IsWSL,WSLDistro,WSLProcess,WSLPath,DockerContainer,DockerImage,DockerContainerID\n")
                     for result in self.results:
                         banner_escaped = result.banner.replace('"', '""').replace('\n', ' ')
@@ -806,6 +886,8 @@ Examples:
                        help='Number of worker threads (default: 100)')
     parser.add_argument('--banner', action='store_true',
                        help='Enable banner grabbing')
+    parser.add_argument('--host-concurrency', type=int, default=16,
+                       help='Max concurrent host scans for network ranges (default: 16)')
     parser.add_argument('--show-closed', action='store_true',
                        help='Show closed/filtered ports in results')
     parser.add_argument('-o', '--output',
@@ -825,7 +907,7 @@ Examples:
         sys.exit(1)
         
     # Initialize scanner
-    scanner = PortScanner(timeout=args.timeout, max_workers=args.workers)
+    scanner = PortScanner(timeout=args.timeout, max_workers=args.workers, enable_banner=args.banner, host_concurrency=args.host_concurrency)
     
     # Determine ports to scan
     ports_to_scan = []

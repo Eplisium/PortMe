@@ -565,8 +565,11 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             return
             
         # Update scanner settings
+        self.scanner.reset_cancel()
         self.scanner.timeout = self.timeout_var.get()
         self.scanner.max_workers = self.workers_var.get()
+        # Wire banner toggle from checkbox
+        self.scanner.enable_banner = bool(self.banner_var.get())
         
         # Start scan thread
         self.scan_running = True
@@ -599,7 +602,9 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             
             # Progress callback forwards updates to GUI via queue
             def progress_cb(completed, total, result):
-                self.queue.put(("progress", completed, total))
+                # Avoid flooding updates if cancelled
+                if not self.scanner.is_cancelled():
+                    self.queue.put(("progress", completed, total))
 
             if '/' in host:  # Network scan
                 ping_first = self.ping_sweep_var.get()
@@ -610,7 +615,11 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                 results = self.scanner.scan_host_ports(host, ports, show_progress=False, progress_callback=progress_cb)
                 self.queue.put(("results", host, results))
                 
-            self.queue.put(("complete", "Scan completed successfully!"))
+            # Only mark complete if not cancelled
+            if not self.scanner.is_cancelled():
+                self.queue.put(("complete", "Scan completed successfully!"))
+            else:
+                self.queue.put(("stopped", "Scan stopped by user"))
             
         except Exception as e:
             self.queue.put(("error", f"Scan failed: {str(e)}"))
@@ -619,6 +628,8 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             
     def stop_scan(self):
         """Stop the current scan"""
+        # Request cooperative cancellation
+        self.scanner.cancel()
         self.scan_running = False
         self.progress_bar.stop()
         self.progress_var.set("Scan stopped by user")
@@ -637,6 +648,9 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                     self.display_results(message[1], message[2])
                 elif message[0] == "progress":
                     completed, total = message[1], message[2]
+                    if self.scanner.is_cancelled():
+                        # Do not show progress updates after cancellation
+                        continue
                     if total > 0:
                         # Determinate progress
                         self.progress_bar.config(mode='determinate', maximum=total)
@@ -644,6 +658,11 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                         pct = int((completed/total)*100)
                         self.progress_var.set(f"Scanning... {completed}/{total} ({pct}%)")
                 elif message[0] == "complete":
+                    self.progress_bar.stop()
+                    self.progress_var.set(message[1])
+                    self.scan_button.config(state="normal")
+                    self.stop_button.config(state="disabled")
+                elif message[0] == "stopped":
                     self.progress_bar.stop()
                     self.progress_var.set(message[1])
                     self.scan_button.config(state="normal")
