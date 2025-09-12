@@ -10,7 +10,9 @@ from tkinter import font as tkfont
 import threading
 import queue
 from port_scanner import PortScanner, ScanResult
+from config_loader import load_config, get_profile_config, list_profiles, config_loader
 import json
+import logging
 
 class PortScannerGUI:
     def __init__(self, root):
@@ -38,6 +40,12 @@ class PortScannerGUI:
         # Set window background
         self.root.configure(bg=self.colors['background'])
         
+        # Initialize configuration
+        self.config = {}
+        self.profiles = {}
+        self.current_profile = None
+        self.load_configuration()
+        
         # Initialize scanner
         self.scanner = PortScanner()
         self.scan_thread = None
@@ -51,6 +59,85 @@ class PortScannerGUI:
         
         # Start queue processing
         self.process_queue()
+    
+    def load_configuration(self):
+        """Load configuration and profiles"""
+        try:
+            self.config = load_config()
+            self.profiles = list_profiles()
+            logging.info(f"Loaded configuration with {len(self.profiles)} profiles")
+        except Exception as e:
+            logging.error(f"Failed to load configuration: {e}")
+            self.config = config_loader.DEFAULT_CONFIG.copy()
+            self.profiles = {}
+    
+    def reload_configuration(self):
+        """Reload configuration from file"""
+        try:
+            config_loader.load_config()  # Reload from file
+            self.load_configuration()
+            self.update_profile_dropdown()
+            self.apply_profile_to_gui("<Custom>")  # Reset to custom
+            messagebox.showinfo("Success", f"Configuration reloaded!\nFound {len(self.profiles)} profiles.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to reload configuration: {e}")
+    
+    def update_profile_dropdown(self):
+        """Update the profile dropdown with available profiles"""
+        if hasattr(self, 'profile_combo'):
+            profile_names = ["<Custom>"] + list(self.profiles.keys())
+            self.profile_combo['values'] = profile_names
+    
+    def apply_profile_to_gui(self, profile_name):
+        """Apply profile settings to GUI controls"""
+        if profile_name == "<Custom>" or profile_name not in self.profiles:
+            self.current_profile = None
+            return
+        
+        try:
+            # Get profile configuration
+            profile_config = get_profile_config(profile_name, self.config)
+            self.current_profile = profile_name
+            
+            # Apply settings to GUI controls
+            if 'host' in profile_config and profile_config['host']:
+                self.host_var.set(profile_config['host'])
+            
+            if 'timeout' in profile_config:
+                self.timeout_var.set(profile_config['timeout'])
+            
+            if 'workers' in profile_config:
+                self.workers_var.set(profile_config['workers'])
+            
+            if 'enable_banner' in profile_config:
+                self.banner_var.set(profile_config['enable_banner'])
+            
+            if 'show_closed' in profile_config:
+                self.show_closed_var.set(profile_config['show_closed'])
+            
+            if 'ping_sweep' in profile_config:
+                self.ping_sweep_var.set(profile_config['ping_sweep'])
+            
+            if 'enable_udp' in profile_config:
+                self.udp_scan_var.set(profile_config['enable_udp'])
+            
+            # Handle ports
+            if 'ports' in profile_config and profile_config['ports']:
+                ports = profile_config['ports']
+                if isinstance(ports, list):
+                    port_str = ','.join(map(str, ports))
+                else:
+                    port_str = str(ports)
+                
+                self.port_option.set("custom")
+                self.custom_ports_var.set(port_str)
+                self.on_port_option_change()
+            
+            logging.info(f"Applied profile '{profile_name}' to GUI")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to apply profile '{profile_name}': {e}")
+            logging.error(f"Failed to apply profile '{profile_name}': {e}")
         
     def setup_styles(self):
         """Configure modern GUI styles"""
@@ -165,6 +252,18 @@ class PortScannerGUI:
                        lightcolor=self.colors['primary'],
                        darkcolor=self.colors['primary'])
         
+        # Configure combobox styles
+        style.configure('Modern.TCombobox',
+                       fieldbackground=self.colors['surface'],
+                       borderwidth=2,
+                       relief='solid',
+                       bordercolor=self.colors['border'],
+                       font=('Segoe UI', 10),
+                       padding=(8, 6))
+        
+        style.map('Modern.TCombobox',
+                 bordercolor=[('focus', self.colors['primary'])])
+        
     def create_widgets(self):
         """Create and layout GUI widgets with modern styling"""
         # Main container with background and responsive padding
@@ -269,6 +368,38 @@ class PortScannerGUI:
         left_scrollable_frame.bind("<Enter>", _bind_to_mousewheel)
         left_scrollable_frame.bind("<Leave>", _unbind_from_mousewheel)
         
+        # Profile selection section
+        profile_section = tk.Frame(left_inner, bg=self.colors['surface'])
+        profile_section.pack(fill=tk.X, pady=(0, 15))
+        
+        profile_header = tk.Frame(profile_section, bg=self.colors['surface'])
+        profile_header.pack(fill=tk.X)
+        
+        tk.Label(profile_header, 
+                text="📋 Configuration Profile", 
+                font=('Segoe UI', 12, 'bold'),
+                fg=self.colors['primary'],
+                bg=self.colors['surface']).pack(side=tk.LEFT)
+        
+        reload_btn = ttk.Button(profile_header, text="🔄", 
+                               command=self.reload_configuration,
+                               style='Secondary.TButton', width=3)
+        reload_btn.pack(side=tk.RIGHT)
+        
+        tk.Label(profile_section, 
+                text="Profile:", 
+                font=('Segoe UI', 9),
+                fg=self.colors['text'],
+                bg=self.colors['surface']).pack(anchor=tk.W, pady=(10, 5))
+        
+        profile_names = ["<Custom>"] + list(self.profiles.keys())
+        self.profile_var = tk.StringVar(value="<Custom>")
+        self.profile_combo = ttk.Combobox(profile_section, textvariable=self.profile_var,
+                                         values=profile_names, state="readonly",
+                                         style='Modern.TCombobox', width=23)
+        self.profile_combo.pack(fill=tk.X)
+        self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_change)
+        
         # Target configuration section
         target_section = tk.Frame(left_inner, bg=self.colors['surface'])
         target_section.pack(fill=tk.X, pady=(0, 20))
@@ -335,6 +466,8 @@ class PortScannerGUI:
         timeout_spin = ttk.Spinbox(settings_grid, from_=0.1, to=10.0, increment=0.1, 
                                   textvariable=self.timeout_var, width=8, style='Modern.TSpinbox')
         timeout_spin.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        # Disable mouse wheel to prevent accidental value changes when scrolling
+        timeout_spin.bind("<MouseWheel>", lambda e: "break")
         
         # Max workers
         tk.Label(settings_grid, text="Max Threads:", font=('Segoe UI', 9),
@@ -343,6 +476,8 @@ class PortScannerGUI:
         workers_spin = ttk.Spinbox(settings_grid, from_=1, to=500, increment=10, 
                                   textvariable=self.workers_var, width=8, style='Modern.TSpinbox')
         workers_spin.grid(row=1, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        # Disable mouse wheel to prevent accidental value changes when scrolling
+        workers_spin.bind("<MouseWheel>", lambda e: "break")
         
         # Options checkboxes
         options_frame = tk.Frame(advanced_section, bg=self.colors['surface'])
@@ -532,6 +667,14 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             self.custom_ports_entry.config(state="normal")
         else:
             self.custom_ports_entry.config(state="disabled")
+    
+    def on_profile_change(self, event=None):
+        """Handle profile selection changes"""
+        selected_profile = self.profile_var.get()
+        if selected_profile and selected_profile != "<Custom>":
+            self.apply_profile_to_gui(selected_profile)
+        else:
+            self.current_profile = None
             
     def quick_scan(self, host, ports):
         """Perform a quick scan with predefined parameters"""

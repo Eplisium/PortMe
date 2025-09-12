@@ -2,7 +2,7 @@
 # Compatible with Python 3.7+
 
 # Core dependencies (most are built-in to Python)
-# No external dependencies required - uses only Python standard library:
+# Most functionality uses only Python standard library:
 # - socket (network operations)
 # - threading (multi-threading)
 # - concurrent.futures (thread pool execution)
@@ -14,6 +14,9 @@
 # - dataclasses (data structures)
 # - typing (type hints)
 # - platform (system detection)
+
+# Required for configuration file support
+PyYAML>=5.4.1           # YAML configuration file parsing
 
 # Optional: For enhanced functionality (uncomment if needed)
 # requests>=2.25.1        # For HTTP banner grabbing enhancements

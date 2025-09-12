@@ -28,6 +28,7 @@ import random
 from pathlib import Path
 from html import escape
 from urllib.parse import quote
+from config_loader import load_config, get_profile_config, list_profiles, config_loader
 
 # Configure logging
 logging.basicConfig(
@@ -71,12 +72,17 @@ class ScanResult:
 class PortScanner:
     """Advanced port scanner with multi-threading and UDP support"""
     
-    def __init__(self, timeout: float = 1.0, max_workers: int = 100, enable_banner: bool = False, host_concurrency: int = 16, enable_udp: bool = False):
+    def __init__(self, timeout: float = 1.0, max_workers: int = 100, enable_banner: bool = False, host_concurrency: int = 16, enable_udp: bool = False, **kwargs):
         self.timeout = timeout
         self.max_workers = max_workers
         self.enable_banner = enable_banner
         self.host_concurrency = host_concurrency
         self.enable_udp = enable_udp
+        
+        # Handle additional configuration parameters
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
         self.results: List[ScanResult] = []
         self.common_ports = {
             20: "FTP Data", 21: "FTP Control", 22: "SSH", 23: "Telnet",
@@ -1487,8 +1493,53 @@ def check_system_requirements():
 
 def main():
     """Main function with CLI interface"""
+    # First, parse config and profile arguments to load configuration
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument('-c', '--config', help='Path to configuration file')
+    pre_parser.add_argument('-P', '--profile', help='Configuration profile to use')
+    pre_parser.add_argument('--list-profiles', action='store_true', help='List available profiles and exit')
+    pre_parser.add_argument('--create-config', help='Create sample configuration file and exit')
+    
+    pre_args, remaining_args = pre_parser.parse_known_args()
+    
+    # Handle special commands first
+    if pre_args.create_config:
+        try:
+            created_file = config_loader.create_default_config_file(pre_args.create_config)
+            print(f"Sample configuration file created: {created_file}")
+            print("\nEdit this file to customize your default settings and profiles.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error creating configuration file: {e}")
+            sys.exit(1)
+    
+    # Load configuration
+    try:
+        base_config = load_config(pre_args.config)
+        if pre_args.profile:
+            config = get_profile_config(pre_args.profile, base_config)
+        else:
+            config = base_config
+    except Exception as e:
+        logger.error(f"Failed to load configuration: {e}")
+        config = config_loader.DEFAULT_CONFIG.copy()
+    
+    # Handle list profiles command
+    if pre_args.list_profiles:
+        profiles = list_profiles()
+        if profiles:
+            print("\nAvailable Profiles:")
+            print("=" * 50)
+            for name, description in profiles.items():
+                print(f"  {name:<15} - {description}")
+        else:
+            print("No profiles found in configuration file.")
+            print("Use --create-config to create a sample configuration with profiles.")
+        sys.exit(0)
+    
+    # Create main parser with configuration defaults
     parser = argparse.ArgumentParser(
-        description="Advanced Port Scanner - Works on Windows and WSL",
+        description="Advanced Port Scanner with Configuration Support",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1497,40 +1548,75 @@ Examples:
   %(prog)s -H 192.168.1.0/24 -p 1-1000
   %(prog)s -H localhost -p 3000 --banner
   %(prog)s -H 127.0.0.1 -p 3000-3010 --timeout 2
+  
+Configuration Examples:
+  %(prog)s --profile web-audit -H example.com
+  %(prog)s -c /path/to/my_scans.yaml -P full-tcp -H 192.168.1.1
+  %(prog)s --profile quick-dev -p 3000  # Override profile ports
+  %(prog)s --list-profiles              # Show available profiles
+  %(prog)s --create-config config.yaml  # Create sample config
         """
     )
     
-    parser.add_argument('-H', '--host', required=True,
+    # Configuration arguments
+    parser.add_argument('-c', '--config', help='Path to configuration file')
+    parser.add_argument('-P', '--profile', help='Configuration profile to use')
+    parser.add_argument('--list-profiles', action='store_true', help='List available profiles and exit')
+    parser.add_argument('--create-config', help='Create sample configuration file and exit')
+    
+    # Get target host from profile if available, otherwise require it
+    profile_host = config.get('host')
+    parser.add_argument('-H', '--host', required=(profile_host is None),
+                       default=profile_host,
                        help='Target host or network (e.g., 192.168.1.1 or 192.168.1.0/24)')
+    
+    # Port selection arguments
     parser.add_argument('-p', '--ports', 
                        help='Ports to scan (e.g., 80,443,22 or 1-1000)')
     parser.add_argument('--common', action='store_true',
                        help='Scan common ports only')
-    parser.add_argument('-t', '--timeout', type=float, default=1.0,
-                       help='Socket timeout in seconds (default: 1.0)')
-    parser.add_argument('-w', '--workers', type=int, default=100,
-                       help='Number of worker threads (default: 100)')
-    parser.add_argument('--banner', action='store_true',
-                       help='Enable banner grabbing')
-    parser.add_argument('--host-concurrency', type=int, default=16,
-                       help='Max concurrent host scans for network ranges (default: 16)')
-    parser.add_argument('--show-closed', action='store_true',
-                       help='Show closed/filtered ports in results')
+    
+    # Scanner configuration with config defaults
+    parser.add_argument('-t', '--timeout', type=float, default=config.get('timeout', 1.0),
+                       help=f'Socket timeout in seconds (default: {config.get("timeout", 1.0)})')
+    parser.add_argument('-w', '--workers', type=int, default=config.get('workers', 100),
+                       help=f'Number of worker threads (default: {config.get("workers", 100)})')
+    parser.add_argument('--host-concurrency', type=int, default=config.get('host_concurrency', 16),
+                       help=f'Max concurrent host scans for network ranges (default: {config.get("host_concurrency", 16)})')
+    
+    # Feature flags with config defaults
+    parser.add_argument('--banner', action='store_true', default=config.get('enable_banner', False),
+                       help=f'Enable banner grabbing (default: {config.get("enable_banner", False)})')
+    parser.add_argument('--show-closed', action='store_true', default=config.get('show_closed', False),
+                       help=f'Show closed/filtered ports in results (default: {config.get("show_closed", False)})')
+    parser.add_argument('--no-ping', action='store_true', default=not config.get('ping_sweep', True),
+                       help=f'Skip ping sweep for network scans (default: {not config.get("ping_sweep", True)})')
+    parser.add_argument('--udp', action='store_true', default=config.get('enable_udp', False),
+                       help=f'Enable UDP scanning in addition to TCP (default: {config.get("enable_udp", False)})')
+    
+    # Output and logging
     parser.add_argument('-o', '--output',
-                       help='Output file (supports .json and .csv)')
+                       help='Output file (supports .json, .csv, .html)')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
-    parser.add_argument('--no-ping', action='store_true',
-                       help='Skip ping sweep for network scans (scan all hosts)')
-    parser.add_argument('--udp', action='store_true',
-                       help='Enable UDP scanning in addition to TCP')
     parser.add_argument('--async', action='store_true',
                        help='Use async I/O for better performance')
     
     args = parser.parse_args()
     
+    # Set up logging level from config or command line
+    log_level = config.get('log_level', 'INFO')
     if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        log_level = 'DEBUG'
+    
+    numeric_level = getattr(logging, log_level, logging.INFO)
+    logging.getLogger().setLevel(numeric_level)
+    
+    # Show configuration info if verbose
+    if args.verbose:
+        logger.debug(f"Using configuration: {config}")
+        if pre_args.profile:
+            logger.debug(f"Applied profile: {pre_args.profile}")
         
     # Check system requirements
     if not check_system_requirements():
@@ -1542,21 +1628,48 @@ Examples:
     # Determine ports to scan
     ports_to_scan = []
     
-    if args.common:
+    # Priority order: CLI ports > profile ports > common/default
+    if args.ports:
+        # Parse CLI port specification
+        try:
+            for port_spec in args.ports.split(','):
+                port_spec = port_spec.strip()
+                if '-' in port_spec:
+                    start, end = map(int, port_spec.split('-'))
+                    ports_to_scan.extend(scanner.get_port_range(start, end))
+                else:
+                    ports_to_scan.append(int(port_spec))
+            logger.info(f"Using CLI-specified ports: {len(ports_to_scan)} ports")
+        except ValueError as e:
+            logger.error(f"Invalid port specification: {args.ports}")
+            sys.exit(1)
+    elif 'ports' in config and config['ports']:
+        # Use profile/config ports
+        profile_ports = config['ports']
+        if isinstance(profile_ports, list):
+            ports_to_scan = profile_ports
+        elif isinstance(profile_ports, str):
+            # Parse string port specification
+            try:
+                for port_spec in profile_ports.split(','):
+                    port_spec = port_spec.strip()
+                    if '-' in port_spec:
+                        start, end = map(int, port_spec.split('-'))
+                        ports_to_scan.extend(scanner.get_port_range(start, end))
+                    else:
+                        ports_to_scan.append(int(port_spec))
+            except ValueError as e:
+                logger.error(f"Invalid port specification in config: {profile_ports}")
+                sys.exit(1)
+        logger.info(f"Using profile/config ports: {len(ports_to_scan)} ports")
+    elif args.common:
+        # Use common ports
         if args.udp:
             ports_to_scan = scanner.get_all_common_ports()
             logger.info("Scanning common TCP and UDP ports")
         else:
             ports_to_scan = scanner.get_common_ports()
             logger.info("Scanning common TCP ports")
-    elif args.ports:
-        # Parse port specification
-        for port_spec in args.ports.split(','):
-            if '-' in port_spec:
-                start, end = map(int, port_spec.split('-'))
-                ports_to_scan.extend(scanner.get_port_range(start, end))
-            else:
-                ports_to_scan.append(int(port_spec))
     else:
         # Default to common ports if nothing specified
         if args.udp:

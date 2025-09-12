@@ -1,0 +1,48 @@
+defaults:
+  enable_banner: true
+  host_concurrency: 20
+  log_level: INFO
+  output_format: json
+  ping_sweep: true
+  show_closed: false
+  timeout: 1.5
+  workers: 200
+profiles:
+  full-tcp:
+    description: 'Scan all TCP ports (WARNING: Very slow!)'
+    enable_banner: false
+    ping_sweep: false
+    ports: 1-65535
+    show_closed: false
+    timeout: 3.0
+    workers: 50
+  local-deep:
+    description: Deep scan of localhost with process and environment info
+    enable_banner: true
+    host: localhost
+    ports: 1-10000
+    show_closed: true
+  quick-dev:
+    description: Quick scan for common development ports
+    enable_banner: true
+    ports:
+    - 3000
+    - 3001
+    - 5000
+    - 8000
+    - 8080
+    - 9000
+  web-audit:
+    description: Scan for common web server and management ports
+    enable_banner: true
+    ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+    - 8000
+    - 3000
+    - 22
+    - 21
+    - 23
+    timeout: 2.0
