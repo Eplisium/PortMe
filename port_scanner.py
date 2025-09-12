@@ -22,6 +22,12 @@ from typing import List, Dict, Optional, Tuple, Callable
 import platform
 import re
 import csv
+import asyncio
+import struct
+import random
+from pathlib import Path
+from html import escape
+from urllib.parse import quote
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +46,7 @@ class ScanResult:
     host: str
     port: int
     status: str
+    protocol: str = "TCP"  # TCP or UDP
     service: str = ""
     banner: str = ""
     response_time: float = 0.0
@@ -47,6 +54,11 @@ class ScanResult:
     process: str = ""
     process_path: str = ""
     local_address: str = ""
+    # Enhanced service detection
+    service_version: str = ""
+    service_info: str = ""
+    fingerprint: str = ""
+    confidence: float = 0.0
     # Environment annotations
     is_wsl: bool = False
     wsl_distro: str = ""
@@ -57,13 +69,14 @@ class ScanResult:
     docker_container_id: str = ""
 
 class PortScanner:
-    """Advanced port scanner with multi-threading support"""
+    """Advanced port scanner with multi-threading and UDP support"""
     
-    def __init__(self, timeout: float = 1.0, max_workers: int = 100, enable_banner: bool = False, host_concurrency: int = 16):
+    def __init__(self, timeout: float = 1.0, max_workers: int = 100, enable_banner: bool = False, host_concurrency: int = 16, enable_udp: bool = False):
         self.timeout = timeout
         self.max_workers = max_workers
         self.enable_banner = enable_banner
         self.host_concurrency = host_concurrency
+        self.enable_udp = enable_udp
         self.results: List[ScanResult] = []
         self.common_ports = {
             20: "FTP Data", 21: "FTP Control", 22: "SSH", 23: "Telnet",
@@ -75,6 +88,30 @@ class PortScanner:
             3000: "Node.js/Development", 3001: "Node.js Alt", 5000: "Flask/Development",
             8000: "Django/Development", 9000: "Development", 27017: "MongoDB"
         }
+        
+        # Common UDP ports for scanning
+        self.common_udp_ports = {
+            53: "DNS", 67: "DHCP Server", 68: "DHCP Client", 69: "TFTP",
+            123: "NTP", 161: "SNMP", 162: "SNMP Trap", 514: "Syslog",
+            1900: "UPnP", 5353: "mDNS", 137: "NetBIOS Name", 138: "NetBIOS Datagram",
+            500: "IPSec", 4500: "IPSec NAT-T", 1701: "L2TP", 1812: "RADIUS Auth",
+            1813: "RADIUS Accounting", 623: "IPMI", 5060: "SIP", 5061: "SIP-TLS"
+        }
+        
+        # Service detection patterns
+        self.service_patterns = {
+            'HTTP': [(r'HTTP/\d\.\d', r'Server:\s*([^\r\n]+)'), (b'HTTP/', 0.9)],
+            'SSH': [(r'SSH-\d\.\d-([^\r\n]+)', None), (b'SSH-', 0.95)],
+            'FTP': [(r'220[\s-]([^\r\n]+)', None), (b'220 ', 0.9)],
+            'SMTP': [(r'220[\s-]([^\r\n]+)', None), (b'220 ', 0.85)],
+            'POP3': [(r'\+OK\s+([^\r\n]+)', None), (b'+OK', 0.9)],
+            'IMAP': [(r'\*\s+OK\s+([^\r\n]+)', None), (b'* OK', 0.9)],
+            'MySQL': [(None, None), (b'\x00\x00\x00\x0a', 0.8)],
+            'PostgreSQL': [(None, None), (b'\x00\x00\x00\x08\x04\xd2\x16/', 0.8)],
+            'Redis': [(r'-ERR\s+([^\r\n]+)', None), (b'-ERR', 0.9)],
+            'MongoDB': [(None, None), (b'\x3a\x00\x00\x00', 0.7)]
+        }
+        
         self._system = platform.system().lower()
         self._local_port_proc_map: Dict[int, Dict[str, str]] = {}
         self._cancel_event = threading.Event()
@@ -116,8 +153,69 @@ class PortScanner:
         except OSError:
             return "Unknown"
             
-    def grab_banner(self, host: str, port: int) -> str:
-        """Attempt to grab service banner"""
+    def detect_service(self, host: str, port: int, banner: str, protocol: str = "TCP") -> Tuple[str, str, str, float]:
+        """Enhanced service detection using pattern matching and fingerprinting"""
+        service_name = ""
+        service_version = ""
+        service_info = ""
+        confidence = 0.0
+        
+        if not banner:
+            # Use port-based detection as fallback
+            if protocol == "TCP" and port in self.common_ports:
+                service_name = self.common_ports[port]
+                confidence = 0.6
+            elif protocol == "UDP" and port in self.common_udp_ports:
+                service_name = self.common_udp_ports[port]
+                confidence = 0.6
+            else:
+                service_name = "Unknown"
+                confidence = 0.1
+            return service_name, service_version, service_info, confidence
+        
+        banner_bytes = banner.encode('utf-8', errors='ignore')
+        
+        # Check against service patterns
+        for service, (patterns, marker_info) in self.service_patterns.items():
+            marker, base_confidence = marker_info
+            
+            if marker and marker in banner_bytes:
+                service_name = service
+                confidence = base_confidence
+                
+                if patterns and patterns[0]:  # Version pattern
+                    version_match = re.search(patterns[0], banner, re.IGNORECASE)
+                    if version_match:
+                        service_version = version_match.group(1)
+                        confidence += 0.1
+                
+                if patterns and patterns[1]:  # Additional info pattern
+                    info_match = re.search(patterns[1], banner, re.IGNORECASE)
+                    if info_match:
+                        service_info = info_match.group(1)
+                        confidence += 0.05
+                
+                break
+        
+        # If no pattern match, try basic service detection
+        if not service_name:
+            if protocol == "TCP" and port in self.common_ports:
+                service_name = self.common_ports[port]
+                confidence = 0.4
+            elif protocol == "UDP" and port in self.common_udp_ports:
+                service_name = self.common_udp_ports[port]
+                confidence = 0.4
+            else:
+                service_name = "Unknown"
+                confidence = 0.1
+        
+        return service_name, service_version, service_info, min(confidence, 1.0)
+    
+    def grab_banner(self, host: str, port: int, protocol: str = "TCP") -> str:
+        """Attempt to grab service banner with protocol support"""
+        if protocol == "UDP":
+            return self._grab_udp_banner(host, port)
+        
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.timeout)
@@ -126,8 +224,21 @@ class PortScanner:
             # Try to grab banner for common services
             if port in [21, 22, 23, 25, 110, 143]:  # Services that send banners
                 banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
-            elif port in [80, 8080]:  # HTTP services
-                sock.send(b"GET / HTTP/1.1\r\nHost: " + host.encode() + b"\r\n\r\n")
+            elif port in [80, 8080, 443, 8443]:  # HTTP/HTTPS services
+                request = f"GET / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: PortScanner/1.0\r\nConnection: close\r\n\r\n"
+                sock.send(request.encode())
+                banner = sock.recv(4096).decode('utf-8', errors='ignore').strip()
+            elif port == 3306:  # MySQL
+                banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
+            elif port == 5432:  # PostgreSQL
+                # Send startup message
+                startup_msg = struct.pack('>I', 8) + struct.pack('>I', 196608) 
+                sock.send(startup_msg)
+                banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
+            elif port == 6379:  # Redis
+                sock.send(b"INFO\r\n")
+                banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
+            elif port == 27017:  # MongoDB
                 banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
             else:
                 # Try generic banner grab
@@ -135,7 +246,49 @@ class PortScanner:
                 banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
                 
             sock.close()
-            return banner[:200] if banner else ""  # Limit banner length
+            return banner[:500] if banner else ""  # Increased limit for better detection
+        except:
+            return ""
+    
+    def _grab_udp_banner(self, host: str, port: int) -> str:
+        """Attempt to grab UDP service banner"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(self.timeout)
+            
+            # Service-specific UDP probes
+            if port == 53:  # DNS
+                # Send DNS query for version.bind
+                query = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03'
+                sock.sendto(query, (host, port))
+                data, _ = sock.recvfrom(1024)
+                return data.decode('utf-8', errors='ignore')[:200]
+            elif port == 123:  # NTP
+                # Send NTP query
+                ntp_query = b'\x1b' + b'\x00' * 47
+                sock.sendto(ntp_query, (host, port))
+                data, _ = sock.recvfrom(1024)
+                return "NTP Response: " + data.hex()[:50]
+            elif port == 161:  # SNMP
+                # Send SNMP get request
+                snmp_query = b'\x30\x19\x02\x01\x00\x04\x06public\xa0\x0c\x02\x04\x00\x00\x00\x00\x02\x01\x00\x02\x01\x00\x30\x00'
+                sock.sendto(snmp_query, (host, port))
+                data, _ = sock.recvfrom(1024)
+                return "SNMP Response"
+            elif port == 69:  # TFTP
+                # Send TFTP read request
+                tftp_query = b'\x00\x01test\x00octet\x00'
+                sock.sendto(tftp_query, (host, port))
+                data, _ = sock.recvfrom(1024)
+                return "TFTP Response"
+            else:
+                # Generic UDP probe
+                sock.sendto(b'\x00', (host, port))
+                data, _ = sock.recvfrom(1024)
+                return data.decode('utf-8', errors='ignore')[:200]
+                
+        except socket.timeout:
+            return "UDP Timeout"
         except:
             return ""
     
@@ -486,13 +639,66 @@ class PortScanner:
             if not result.local_address:
                 result.local_address = str(w.get('address') or '')
             
-    def scan_port(self, host: str, port: int) -> ScanResult:
-        """Scan a single port"""
+    def scan_udp_port(self, host: str, port: int) -> ScanResult:
+        """Scan a single UDP port"""
+        start_time = time.time()
+        
+        if self._cancel_event.is_set():
+            return ScanResult(host, port, "CANCELLED", "UDP", "", "", 0.0)
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(self.timeout)
+            
+            # Send a probe packet
+            if port == 53:  # DNS
+                probe = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07example\x03com\x00\x00\x01\x00\x01'
+            elif port == 123:  # NTP
+                probe = b'\x1b' + b'\x00' * 47
+            elif port == 161:  # SNMP
+                probe = b'\x30\x19\x02\x01\x00\x04\x06public\xa0\x0c\x02\x04\x00\x00\x00\x00\x02\x01\x00\x02\x01\x00\x30\x00'
+            else:
+                probe = b'\x00' * 4
+            
+            sock.sendto(probe, (host, port))
+            
+            try:
+                data, _ = sock.recvfrom(1024)
+                response_time = time.time() - start_time
+                service = self.common_udp_ports.get(port, "Unknown")
+                banner = self._grab_udp_banner(host, port) if self.enable_banner else ""
+                
+                # Enhanced service detection
+                service_name, service_version, service_info, confidence = self.detect_service(host, port, banner, "UDP")
+                
+                result = ScanResult(host, port, "OPEN", "UDP", service_name, banner, response_time)
+                result.service_version = service_version
+                result.service_info = service_info
+                result.confidence = confidence
+                
+                sock.close()
+                return result
+                
+            except socket.timeout:
+                # UDP timeout doesn't necessarily mean closed
+                response_time = time.time() - start_time
+                sock.close()
+                return ScanResult(host, port, "OPEN|FILTERED", "UDP", "", "", response_time)
+                
+        except Exception as e:
+            logger.debug(f"Error scanning UDP {host}:{port} - {e}")
+            return ScanResult(host, port, "ERROR", "UDP", "", str(e), time.time() - start_time)
+    
+    def scan_port(self, host: str, port: int, protocol: str = "TCP") -> ScanResult:
+        """Scan a single port with protocol support"""
+        if protocol == "UDP":
+            return self.scan_udp_port(host, port)
+            
         start_time = time.time()
         
         # Early out if cancelled; avoid any network I/O
         if self._cancel_event.is_set():
-            return ScanResult(host, port, "CANCELLED", "", "", 0.0)
+            return ScanResult(host, port, "CANCELLED", "TCP", "", "", 0.0)
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -502,21 +708,36 @@ class PortScanner:
             
             if result == 0:
                 service = self.get_service_name(port)
-                banner = self.grab_banner(host, port) if self.enable_banner else ""
+                banner = self.grab_banner(host, port, "TCP") if self.enable_banner else ""
+                
+                # Enhanced service detection
+                service_name, service_version, service_info, confidence = self.detect_service(host, port, banner, "TCP")
+                
+                scan_result = ScanResult(host, port, "OPEN", "TCP", service_name, banner, response_time)
+                scan_result.service_version = service_version
+                scan_result.service_info = service_info
+                scan_result.confidence = confidence
+                scan_result.fingerprint = banner[:100] if banner else ""
+                
                 sock.close()
-                return ScanResult(host, port, "OPEN", service, banner, response_time)
+                return scan_result
             else:
                 sock.close()
-                return ScanResult(host, port, "CLOSED", "", "", response_time)
+                return ScanResult(host, port, "CLOSED", "TCP", "", "", response_time)
                 
         except socket.timeout:
-            return ScanResult(host, port, "FILTERED", "", "", self.timeout)
+            return ScanResult(host, port, "FILTERED", "TCP", "", "", self.timeout)
         except Exception as e:
             logger.debug(f"Error scanning {host}:{port} - {e}")
-            return ScanResult(host, port, "ERROR", "", str(e), time.time() - start_time)
+            return ScanResult(host, port, "ERROR", "TCP", "", str(e), time.time() - start_time)
             
-    def scan_host_ports(self, host: str, ports: List[int], show_progress: bool = True, progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> List[ScanResult]:
-        """Scan multiple ports on a single host"""
+    def scan_host_ports(self, host: str, ports: List[int], protocols: List[str] = None, show_progress: bool = True, progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> List[ScanResult]:
+        """Scan multiple ports on a single host with protocol support"""
+        if protocols is None:
+            protocols = ["TCP"]
+            if self.enable_udp:
+                protocols.append("UDP")
+                
         results = []
         
         if self._cancel_event.is_set():
@@ -543,26 +764,28 @@ class PortScanner:
                 wsl_map = self._build_wsl_port_process_map()
                 wsl_distro = self._detect_wsl_default_distro()
 
-        logger.info(f"Scanning {len(ports)} ports on {host}")
+        total_scans = len(ports) * len(protocols)
+        logger.info(f"Scanning {len(ports)} ports on {host} using protocols: {', '.join(protocols)}")
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_port: Dict = {}
+            future_to_port_protocol: Dict = {}
             # Submit tasks cooperatively, stop if cancelled
             for p in ports:
-                if self._cancel_event.is_set():
-                    break
-                future_to_port[executor.submit(self.scan_port, host, p)] = p
+                for protocol in protocols:
+                    if self._cancel_event.is_set():
+                        break
+                    future_to_port_protocol[executor.submit(self.scan_port, host, p, protocol)] = (p, protocol)
 
             completed = 0
             try:
-                for future in as_completed(future_to_port):
+                for future in as_completed(future_to_port_protocol):
                     if self._cancel_event.is_set():
                         # Cancel any pending futures and break
                         try:
                             executor.shutdown(cancel_futures=True)  # type: ignore[arg-type]
                         except TypeError:
                             # Python < 3.9 compatibility: fall back to manual cancel
-                            for f in future_to_port:
+                            for f in future_to_port_protocol:
                                 if not f.done():
                                     f.cancel()
                         break
@@ -579,12 +802,12 @@ class PortScanner:
 
                     # Only print progress if explicitly requested, no callback provided, and not cancelled
                     if show_progress and progress_callback is None and completed % 10 == 0 and not self._cancel_event.is_set():
-                        print(f"Progress: {completed}/{len(ports)} ports scanned", end='\r')
+                        print(f"Progress: {completed}/{total_scans} scans completed", end='\r')
 
                     # Notify progress callback, if provided and not cancelled
                     if progress_callback is not None and not self._cancel_event.is_set():
                         try:
-                            progress_callback(completed, len(ports), result)
+                            progress_callback(completed, total_scans, result)
                         except Exception:
                             # Ensure scanning continues even if callback has issues
                             pass
@@ -599,8 +822,8 @@ class PortScanner:
         if show_progress and progress_callback is None and not self._cancel_event.is_set():
             print()  # New line after progress when we own console output
         
-        # Sort results by port number
-        results.sort(key=lambda x: x.port)
+        # Sort results by port number, then by protocol
+        results.sort(key=lambda x: (x.port, x.protocol))
         self.results.extend(results)
         return results
         
@@ -665,7 +888,7 @@ class PortScanner:
         logger.info(f"Found {len(live_hosts)} live hosts out of {len(hosts)} total")
         return sorted(live_hosts, key=lambda x: ipaddress.ip_address(x))
     
-    def scan_network_range(self, network: str, ports: List[int], ping_first: bool = True, progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> Dict[str, List[ScanResult]]:
+    def scan_network_range(self, network: str, ports: List[int], protocols: List[str] = None, ping_first: bool = True, progress_callback: Optional[Callable[[int, int, ScanResult], None]] = None) -> Dict[str, List[ScanResult]]:
         """Scan ports across a network range with bounded host-level concurrency.
         If a progress_callback is provided, it will be invoked for each completed
         port across all hosts with (completed, total, result).
@@ -673,9 +896,15 @@ class PortScanner:
         Args:
             network: Network range in CIDR format (e.g., "192.168.1.0/24")
             ports: List of port numbers to scan
+            protocols: List of protocols to scan (TCP, UDP)
             ping_first: If True, perform ping sweep first to identify live hosts
             progress_callback: Optional callback for progress updates
         """
+        if protocols is None:
+            protocols = ["TCP"]
+            if self.enable_udp:
+                protocols.append("UDP")
+                
         try:
             network_obj = ipaddress.ip_network(network, strict=False)
         except ValueError as e:
@@ -698,7 +927,8 @@ class PortScanner:
         # Prepare aggregated progress if callback provided
         total_hosts = len(hosts_to_scan)
         total_ports = len(ports)
-        grand_total = total_hosts * total_ports if total_ports > 0 else 0
+        total_protocols = len(protocols)
+        grand_total = total_hosts * total_ports * total_protocols if total_ports > 0 else 0
         completed_counter = 0
 
         def _wrap_progress_callback(_completed_for_host: int, _total_for_host: int, result: ScanResult):
@@ -719,7 +949,7 @@ class PortScanner:
             for host_str in hosts_to_scan:
                 if self._cancel_event.is_set():
                     break
-                host_futures[host_executor.submit(self.scan_host_ports, host_str, ports, False, _wrap_progress_callback)] = host_str
+                host_futures[host_executor.submit(self.scan_host_ports, host_str, ports, protocols, False, _wrap_progress_callback)] = host_str
 
             try:
                 for fut in as_completed(host_futures):
@@ -749,10 +979,199 @@ class PortScanner:
                 raise
 
         return all_results
+    
+    async def async_scan_port(self, host: str, port: int, protocol: str = "TCP") -> ScanResult:
+        """Async version of port scanning for better performance"""
+        if protocol == "UDP":
+            return await self._async_scan_udp_port(host, port)
         
-    def get_common_ports(self) -> List[int]:
-        """Get list of common ports to scan"""
+        start_time = time.time()
+        
+        if self._cancel_event.is_set():
+            return ScanResult(host, port, "CANCELLED", "TCP", "", "", 0.0)
+        
+        try:
+            # Use asyncio for non-blocking I/O
+            loop = asyncio.get_event_loop()
+            
+            # Create socket connection with timeout
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=self.timeout
+                )
+                
+                response_time = time.time() - start_time
+                
+                # Get banner if enabled
+                banner = ""
+                if self.enable_banner:
+                    banner = await self._async_grab_banner(reader, writer, host, port, "TCP")
+                
+                writer.close()
+                await writer.wait_closed()
+                
+                # Enhanced service detection
+                service_name, service_version, service_info, confidence = self.detect_service(host, port, banner, "TCP")
+                
+                scan_result = ScanResult(host, port, "OPEN", "TCP", service_name, banner, response_time)
+                scan_result.service_version = service_version
+                scan_result.service_info = service_info
+                scan_result.confidence = confidence
+                scan_result.fingerprint = banner[:100] if banner else ""
+                
+                return scan_result
+                
+            except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+                response_time = time.time() - start_time
+                if response_time >= self.timeout:
+                    return ScanResult(host, port, "FILTERED", "TCP", "", "", response_time)
+                else:
+                    return ScanResult(host, port, "CLOSED", "TCP", "", "", response_time)
+                    
+        except Exception as e:
+            logger.debug(f"Error async scanning {host}:{port} - {e}")
+            return ScanResult(host, port, "ERROR", "TCP", "", str(e), time.time() - start_time)
+    
+    async def _async_scan_udp_port(self, host: str, port: int) -> ScanResult:
+        """Async UDP port scanning"""
+        start_time = time.time()
+        
+        if self._cancel_event.is_set():
+            return ScanResult(host, port, "CANCELLED", "UDP", "", "", 0.0)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Create UDP socket
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: asyncio.DatagramProtocol(),
+                remote_addr=(host, port)
+            )
+            
+            # Send probe packet
+            if port == 53:  # DNS
+                probe = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07example\x03com\x00\x00\x01\x00\x01'
+            elif port == 123:  # NTP
+                probe = b'\x1b' + b'\x00' * 47
+            elif port == 161:  # SNMP
+                probe = b'\x30\x19\x02\x01\x00\x04\x06public\xa0\x0c\x02\x04\x00\x00\x00\x00\x02\x01\x00\x02\x01\x00\x30\x00'
+            else:
+                probe = b'\x00' * 4
+            
+            transport.sendto(probe)
+            
+            try:
+                # Wait for response with timeout
+                await asyncio.wait_for(asyncio.sleep(0.1), timeout=self.timeout)
+                response_time = time.time() - start_time
+                
+                service = self.common_udp_ports.get(port, "Unknown")
+                banner = self._grab_udp_banner(host, port) if self.enable_banner else ""
+                
+                # Enhanced service detection
+                service_name, service_version, service_info, confidence = self.detect_service(host, port, banner, "UDP")
+                
+                result = ScanResult(host, port, "OPEN", "UDP", service_name, banner, response_time)
+                result.service_version = service_version
+                result.service_info = service_info
+                result.confidence = confidence
+                
+                transport.close()
+                return result
+                
+            except asyncio.TimeoutError:
+                response_time = time.time() - start_time
+                transport.close()
+                return ScanResult(host, port, "OPEN|FILTERED", "UDP", "", "", response_time)
+                
+        except Exception as e:
+            logger.debug(f"Error async scanning UDP {host}:{port} - {e}")
+            return ScanResult(host, port, "ERROR", "UDP", "", str(e), time.time() - start_time)
+    
+    async def _async_grab_banner(self, reader, writer, host: str, port: int, protocol: str) -> str:
+        """Async banner grabbing"""
+        try:
+            if port in [21, 22, 23, 25, 110, 143]:  # Services that send banners
+                data = await asyncio.wait_for(reader.read(1024), timeout=self.timeout)
+                return data.decode('utf-8', errors='ignore').strip()
+            elif port in [80, 8080, 443, 8443]:  # HTTP/HTTPS services
+                request = f"GET / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: PortScanner/1.0\r\nConnection: close\r\n\r\n"
+                writer.write(request.encode())
+                await writer.drain()
+                data = await asyncio.wait_for(reader.read(4096), timeout=self.timeout)
+                return data.decode('utf-8', errors='ignore').strip()
+            elif port == 6379:  # Redis
+                writer.write(b"INFO\r\n")
+                await writer.drain()
+                data = await asyncio.wait_for(reader.read(1024), timeout=self.timeout)
+                return data.decode('utf-8', errors='ignore').strip()
+            else:
+                # Try generic banner grab
+                writer.write(b"\r\n")
+                await writer.drain()
+                data = await asyncio.wait_for(reader.read(1024), timeout=self.timeout)
+                return data.decode('utf-8', errors='ignore').strip()
+        except:
+            return ""
+    
+    async def async_scan_host_ports(self, host: str, ports: List[int], protocols: List[str] = None) -> List[ScanResult]:
+        """Async version of host port scanning for better performance"""
+        if protocols is None:
+            protocols = ["TCP"]
+            if self.enable_udp:
+                protocols.append("UDP")
+        
+        results = []
+        
+        if self._cancel_event.is_set():
+            return results
+        
+        # Resolve hostname if needed
+        if not self.is_valid_ip(host):
+            resolved_ip = self.resolve_hostname(host)
+            if not resolved_ip:
+                logger.error(f"Could not resolve hostname: {host}")
+                return results
+            host = resolved_ip
+        
+        # Create semaphore to limit concurrent connections
+        semaphore = asyncio.Semaphore(self.max_workers)
+        
+        async def scan_with_semaphore(port: int, protocol: str):
+            async with semaphore:
+                return await self.async_scan_port(host, port, protocol)
+        
+        # Create all scan tasks
+        tasks = []
+        for port in ports:
+            for protocol in protocols:
+                if self._cancel_event.is_set():
+                    break
+                task = asyncio.create_task(scan_with_semaphore(port, protocol))
+                tasks.append(task)
+        
+        # Execute all tasks and collect results
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Filter out exceptions and cancelled tasks
+            results = [r for r in results if isinstance(r, ScanResult) and r.status != "CANCELLED"]
+        
+        # Sort results by port number, then by protocol
+        results.sort(key=lambda x: (x.port, x.protocol))
+        return results
+        
+    def get_common_ports(self, protocol: str = "TCP") -> List[int]:
+        """Get list of common ports to scan for a specific protocol"""
+        if protocol == "UDP":
+            return list(self.common_udp_ports.keys())
         return list(self.common_ports.keys())
+    
+    def get_all_common_ports(self) -> List[int]:
+        """Get combined list of common TCP and UDP ports"""
+        tcp_ports = set(self.common_ports.keys())
+        udp_ports = set(self.common_udp_ports.keys())
+        return sorted(list(tcp_ports.union(udp_ports)))
         
     def get_port_range(self, start: int, end: int) -> List[int]:
         """Generate port range"""
@@ -789,8 +1208,194 @@ class PortScanner:
         open_count = sum(1 for r in results if r.status == "OPEN")
         print(f"\nSummary: {open_count} open ports found out of {len(results)} scanned")
         
+    def generate_html_report(self, results: List[ScanResult] = None, output_file: str = "scan_report.html") -> str:
+        """Generate a professional HTML report"""
+        if results is None:
+            results = self.results
+            
+        if not results:
+            logger.warning("No results to generate report")
+            return ""
+        
+        # Group results by host
+        hosts_data = {}
+        for result in results:
+            if result.host not in hosts_data:
+                hosts_data[result.host] = {'tcp': [], 'udp': [], 'open_count': 0, 'total_count': 0}
+            
+            hosts_data[result.host][result.protocol.lower()].append(result)
+            hosts_data[result.host]['total_count'] += 1
+            if result.status == "OPEN":
+                hosts_data[result.host]['open_count'] += 1
+        
+        # Generate HTML content
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Port Scanner Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background: #f5f7fa; }}
+        .container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }}
+        .header h1 {{ margin: 0; font-size: 2.5em; }}
+        .header .subtitle {{ opacity: 0.9; margin-top: 10px; }}
+        .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }}
+        .stat-card {{ background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }}
+        .stat-number {{ font-size: 2em; font-weight: bold; color: #667eea; }}
+        .stat-label {{ color: #666; margin-top: 5px; }}
+        .host-section {{ background: white; margin-bottom: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }}
+        .host-header {{ background: #667eea; color: white; padding: 20px; }}
+        .host-title {{ margin: 0; font-size: 1.5em; }}
+        .host-stats {{ opacity: 0.9; margin-top: 5px; }}
+        .results-table {{ width: 100%; border-collapse: collapse; }}
+        .results-table th {{ background: #f8f9fa; padding: 12px; text-align: left; font-weight: 600; }}
+        .results-table td {{ padding: 12px; border-bottom: 1px solid #eee; }}
+        .results-table tr:hover {{ background: #f8f9fa; }}
+        .status-open {{ color: #28a745; font-weight: bold; }}
+        .status-closed {{ color: #dc3545; }}
+        .status-filtered {{ color: #ffc107; }}
+        .protocol-tcp {{ background: #007bff; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; }}
+        .protocol-udp {{ background: #6f42c1; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; }}
+        .service-info {{ font-size: 0.9em; color: #666; }}
+        .confidence {{ font-size: 0.8em; padding: 2px 6px; border-radius: 10px; }}
+        .confidence-high {{ background: #d4edda; color: #155724; }}
+        .confidence-medium {{ background: #fff3cd; color: #856404; }}
+        .confidence-low {{ background: #f8d7da; color: #721c24; }}
+        .banner-text {{ font-family: monospace; font-size: 0.8em; max-width: 300px; word-break: break-all; }}
+        .footer {{ text-align: center; margin-top: 30px; color: #666; }}
+        .no-results {{ text-align: center; padding: 40px; color: #666; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 Port Scanner Report</h1>
+            <div class="subtitle">Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}</div>
+        </div>
+        
+        <div class="summary">
+            <div class="stat-card">
+                <div class="stat-number">{len(hosts_data)}</div>
+                <div class="stat-label">Hosts Scanned</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{len([r for r in results if r.status == 'OPEN'])}</div>
+                <div class="stat-label">Open Ports</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{len(results)}</div>
+                <div class="stat-label">Total Scans</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{len(set([r.service for r in results if r.service and r.status == 'OPEN']))}</div>
+                <div class="stat-label">Services Found</div>
+            </div>
+        </div>
+"""
+        
+        # Add host sections
+        for host, data in hosts_data.items():
+            open_count = data['open_count']
+            total_count = data['total_count']
+            
+            html_content += f"""
+        <div class="host-section">
+            <div class="host-header">
+                <h2 class="host-title">🎯 {escape(host)}</h2>
+                <div class="host-stats">{open_count} open ports found out of {total_count} scanned</div>
+            </div>
+            <table class="results-table">
+                <thead>
+                    <tr>
+                        <th>Port</th>
+                        <th>Protocol</th>
+                        <th>Status</th>
+                        <th>Service</th>
+                        <th>Version</th>
+                        <th>Confidence</th>
+                        <th>Response Time</th>
+                        <th>Banner</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+            
+            # Combine and sort all results for this host
+            all_host_results = data['tcp'] + data['udp']
+            all_host_results.sort(key=lambda x: (x.port, x.protocol))
+            
+            for result in all_host_results:
+                if result.status not in ["OPEN", "CLOSED", "FILTERED"]:
+                    continue
+                    
+                status_class = f"status-{result.status.lower().replace('|', '-')}"
+                protocol_class = f"protocol-{result.protocol.lower()}"
+                
+                confidence_class = "confidence-low"
+                confidence_text = f"{result.confidence:.1%}" if hasattr(result, 'confidence') and result.confidence else "N/A"
+                
+                if hasattr(result, 'confidence') and result.confidence:
+                    if result.confidence >= 0.8:
+                        confidence_class = "confidence-high"
+                    elif result.confidence >= 0.6:
+                        confidence_class = "confidence-medium"
+                
+                service_version = getattr(result, 'service_version', '') or ''
+                service_info = getattr(result, 'service_info', '') or ''
+                
+                version_display = service_version
+                if service_info and service_info != service_version:
+                    version_display += f" ({service_info})" if version_display else service_info
+                
+                banner_display = escape(result.banner)[:100] + ("..." if len(result.banner) > 100 else "") if result.banner else ""
+                
+                html_content += f"""
+                    <tr>
+                        <td><strong>{result.port}</strong></td>
+                        <td><span class="{protocol_class}">{result.protocol}</span></td>
+                        <td><span class="{status_class}">{result.status}</span></td>
+                        <td>{escape(result.service) if result.service else 'Unknown'}</td>
+                        <td class="service-info">{escape(version_display) if version_display else '-'}</td>
+                        <td><span class="confidence {confidence_class}">{confidence_text}</span></td>
+                        <td>{result.response_time:.3f}s</td>
+                        <td class="banner-text">{banner_display}</td>
+                    </tr>
+"""
+            
+            if not all_host_results:
+                html_content += '<tr><td colspan="8" class="no-results">No scan results available</td></tr>'
+            
+            html_content += """
+                </tbody>
+            </table>
+        </div>
+"""
+        
+        # Close HTML
+        html_content += f"""
+        <div class="footer">
+            <p>Report generated by Advanced Port Scanner | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        # Write to file
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            logger.info(f"HTML report generated: {output_file}")
+            return output_file
+        except Exception as e:
+            logger.error(f"Failed to generate HTML report: {e}")
+            return ""
+    
     def export_results(self, filename: str, format: str = "json"):
-        """Export results to file"""
+        """Export results to file with multiple format support"""
         if not self.results:
             logger.warning("No results to export")
             return
@@ -799,9 +1404,10 @@ class PortScanner:
             if format.lower() == "json":
                 data = []
                 for result in self.results:
-                    data.append({
+                    result_dict = {
                         "host": result.host,
                         "port": result.port,
+                        "protocol": result.protocol,
                         "status": result.status,
                         "service": result.service,
                         "banner": result.banner,
@@ -817,14 +1423,26 @@ class PortScanner:
                         "docker_container": result.docker_container,
                         "docker_image": result.docker_image,
                         "docker_container_id": result.docker_container_id
-                    })
+                    }
+                    
+                    # Add enhanced service detection fields if available
+                    if hasattr(result, 'service_version'):
+                        result_dict['service_version'] = result.service_version
+                    if hasattr(result, 'service_info'):
+                        result_dict['service_info'] = result.service_info
+                    if hasattr(result, 'confidence'):
+                        result_dict['confidence'] = result.confidence
+                    if hasattr(result, 'fingerprint'):
+                        result_dict['fingerprint'] = result.fingerprint
+                    
+                    data.append(result_dict)
                     
                 with open(filename, 'w') as f:
                     json.dump(data, f, indent=2)
                     
             elif format.lower() == "csv":
                 with open(filename, 'w', newline='') as f:
-                    f.write("Host,Port,Status,Service,Banner,ResponseTime,PID,Process,ProcessPath,LocalAddress,IsWSL,WSLDistro,WSLProcess,WSLPath,DockerContainer,DockerImage,DockerContainerID\n")
+                    f.write("Host,Port,Protocol,Status,Service,ServiceVersion,Confidence,Banner,ResponseTime,PID,Process,ProcessPath,LocalAddress,IsWSL,WSLDistro,WSLProcess,WSLPath,DockerContainer,DockerImage,DockerContainerID\n")
                     for result in self.results:
                         banner_escaped = result.banner.replace('"', '""').replace('\n', ' ')
                         proc_path = (result.process_path or '').replace('"', '""')
@@ -836,7 +1454,15 @@ class PortScanner:
                         dname = (result.docker_container or '').replace('"', '""')
                         dimg = (result.docker_image or '').replace('"', '""')
                         dcid = (result.docker_container_id or '').replace('"', '""')
-                        f.write(f'{result.host},{result.port},{result.status},{result.service},"{banner_escaped}",{result.response_time},{result.pid or ""},"{proc_name}","{proc_path}","{local_addr}",{str(result.is_wsl).lower()},"{wsld}","{wsln}","{wslp}","{dname}","{dimg}","{dcid}"\n')
+                        
+                        service_version = getattr(result, 'service_version', '') or ''
+                        confidence = getattr(result, 'confidence', 0.0) or 0.0
+                        
+                        f.write(f'{result.host},{result.port},{result.protocol},{result.status},{result.service},"{service_version}",{confidence:.2f},"{banner_escaped}",{result.response_time},{result.pid or ""},"{proc_name}","{proc_path}","{local_addr}",{str(result.is_wsl).lower()},"{wsld}","{wsln}","{wslp}","{dname}","{dimg}","{dcid}"\n')
+                        
+            elif format.lower() == "html":
+                self.generate_html_report(self.results, filename)
+                return
                         
             logger.info(f"Results exported to {filename}")
             
@@ -896,6 +1522,10 @@ Examples:
                        help='Enable verbose logging')
     parser.add_argument('--no-ping', action='store_true',
                        help='Skip ping sweep for network scans (scan all hosts)')
+    parser.add_argument('--udp', action='store_true',
+                       help='Enable UDP scanning in addition to TCP')
+    parser.add_argument('--async', action='store_true',
+                       help='Use async I/O for better performance')
     
     args = parser.parse_args()
     
@@ -907,14 +1537,18 @@ Examples:
         sys.exit(1)
         
     # Initialize scanner
-    scanner = PortScanner(timeout=args.timeout, max_workers=args.workers, enable_banner=args.banner, host_concurrency=args.host_concurrency)
+    scanner = PortScanner(timeout=args.timeout, max_workers=args.workers, enable_banner=args.banner, host_concurrency=args.host_concurrency, enable_udp=args.udp)
     
     # Determine ports to scan
     ports_to_scan = []
     
     if args.common:
-        ports_to_scan = scanner.get_common_ports()
-        logger.info("Scanning common ports")
+        if args.udp:
+            ports_to_scan = scanner.get_all_common_ports()
+            logger.info("Scanning common TCP and UDP ports")
+        else:
+            ports_to_scan = scanner.get_common_ports()
+            logger.info("Scanning common TCP ports")
     elif args.ports:
         # Parse port specification
         for port_spec in args.ports.split(','):
@@ -925,8 +1559,12 @@ Examples:
                 ports_to_scan.append(int(port_spec))
     else:
         # Default to common ports if nothing specified
-        ports_to_scan = scanner.get_common_ports()
-        logger.info("No ports specified, scanning common ports")
+        if args.udp:
+            ports_to_scan = scanner.get_all_common_ports()
+            logger.info("No ports specified, scanning common TCP and UDP ports")
+        else:
+            ports_to_scan = scanner.get_common_ports()
+            logger.info("No ports specified, scanning common TCP ports")
     
     # Remove duplicates and sort
     ports_to_scan = sorted(list(set(ports_to_scan)))
@@ -935,16 +1573,26 @@ Examples:
     start_time = datetime.now()
     logger.info(f"Starting port scan at {start_time}")
     
+    # Determine protocols to scan
+    protocols = ["TCP"]
+    if args.udp:
+        protocols.append("UDP")
+    
     try:
         if '/' in args.host:  # Network range
             logger.info(f"Scanning network range: {args.host}")
             ping_first = not args.no_ping  # Invert the flag
-            all_results = scanner.scan_network_range(args.host, ports_to_scan, ping_first=ping_first)
+            all_results = scanner.scan_network_range(args.host, ports_to_scan, protocols, ping_first=ping_first)
             
             for host, results in all_results.items():
                 scanner.print_results(results, args.show_closed)
         else:  # Single host
-            results = scanner.scan_host_ports(args.host, ports_to_scan)
+            if getattr(args, 'async', False):
+                # Use async scanning for better performance
+                import asyncio
+                results = asyncio.run(scanner.async_scan_host_ports(args.host, ports_to_scan, protocols))
+            else:
+                results = scanner.scan_host_ports(args.host, ports_to_scan, protocols)
             scanner.print_results(results, args.show_closed)
             
         end_time = datetime.now()
@@ -953,7 +1601,12 @@ Examples:
         
         # Export results if requested
         if args.output:
-            format_type = "json" if args.output.endswith('.json') else "csv"
+            if args.output.endswith('.html'):
+                format_type = "html"
+            elif args.output.endswith('.json'):
+                format_type = "json"
+            else:
+                format_type = "csv"
             scanner.export_results(args.output, format_type)
             
     except KeyboardInterrupt:

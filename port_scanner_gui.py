@@ -360,6 +360,14 @@ class PortScannerGUI:
         ttk.Checkbutton(options_frame, text="Enable Ping Sweep (Network Scans)", 
                        variable=self.ping_sweep_var, style='Modern.TCheckbutton').pack(anchor=tk.W, pady=(5, 0))
         
+        self.udp_scan_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="Enable UDP Scanning", 
+                       variable=self.udp_scan_var, style='Modern.TCheckbutton').pack(anchor=tk.W, pady=(5, 0))
+        
+        self.async_scan_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="Use Async I/O (Better Performance)", 
+                       variable=self.async_scan_var, style='Modern.TCheckbutton').pack(anchor=tk.W, pady=(5, 0))
+        
         # Control buttons section
         controls_section = tk.Frame(left_inner, bg=self.colors['surface'])
         controls_section.pack(fill=tk.X, pady=(0, 20))
@@ -388,6 +396,9 @@ class PortScannerGUI:
         ttk.Button(button_grid, text="💾 Export Results", 
                   command=self.export_results, style='Success.TButton').pack(fill=tk.X, pady=2)
         
+        ttk.Button(button_grid, text="📄 Generate HTML Report", 
+                  command=self.generate_html_report, style='Success.TButton').pack(fill=tk.X, pady=2)
+        
         # Quick scan section
         quick_section = tk.Frame(left_inner, bg=self.colors['surface'])
         quick_section.pack(fill=tk.X)
@@ -406,6 +417,9 @@ class PortScannerGUI:
                   style='Secondary.TButton').pack(fill=tk.X, pady=1)
         ttk.Button(quick_buttons, text="Web Ports", 
                   command=lambda: self.quick_scan("localhost", "80,443,8000,8080,3000,5000"),
+                  style='Secondary.TButton').pack(fill=tk.X, pady=1)
+        ttk.Button(quick_buttons, text="UDP Services", 
+                  command=lambda: self.quick_scan_udp("localhost", "53,123,161,514,1900"),
                   style='Secondary.TButton').pack(fill=tk.X, pady=1)
         ttk.Button(quick_buttons, text="Common Services", 
                   command=lambda: self.quick_scan("localhost", "common"),
@@ -527,6 +541,17 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
         else:
             self.port_option.set("custom")
             self.custom_ports_var.set(ports)
+        # Disable UDP for regular quick scans
+        self.udp_scan_var.set(False)
+        self.start_scan()
+    
+    def quick_scan_udp(self, host, ports):
+        """Perform a quick UDP scan with predefined parameters"""
+        self.host_var.set(host)
+        self.port_option.set("custom")
+        self.custom_ports_var.set(ports)
+        # Enable UDP for UDP quick scans
+        self.udp_scan_var.set(True)
         self.start_scan()
         
     def start_scan(self):
@@ -570,6 +595,8 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
         self.scanner.max_workers = self.workers_var.get()
         # Wire banner toggle from checkbox
         self.scanner.enable_banner = bool(self.banner_var.get())
+        # Enable UDP scanning if requested
+        self.scanner.enable_udp = bool(self.udp_scan_var.get())
         
         # Start scan thread
         self.scan_running = True
@@ -606,13 +633,23 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                 if not self.scanner.is_cancelled():
                     self.queue.put(("progress", completed, total))
 
+            # Determine protocols to scan
+            protocols = ["TCP"]
+            if self.udp_scan_var.get():
+                protocols.append("UDP")
+            
             if '/' in host:  # Network scan
                 ping_first = self.ping_sweep_var.get()
-                results = self.scanner.scan_network_range(host, ports, ping_first=ping_first, progress_callback=progress_cb)
+                results = self.scanner.scan_network_range(host, ports, protocols, ping_first=ping_first, progress_callback=progress_cb)
                 for host_ip, host_results in results.items():
                     self.queue.put(("results", host_ip, host_results))
             else:  # Single host scan
-                results = self.scanner.scan_host_ports(host, ports, show_progress=False, progress_callback=progress_cb)
+                if self.async_scan_var.get():
+                    # Use async scanning for better performance
+                    import asyncio
+                    results = asyncio.run(self.scanner.async_scan_host_ports(host, ports, protocols))
+                else:
+                    results = self.scanner.scan_host_ports(host, ports, protocols, show_progress=False, progress_callback=progress_cb)
                 self.queue.put(("results", host, results))
                 
             # Only mark complete if not cancelled
@@ -687,11 +724,11 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             self.results_text.delete(1.0, tk.END)
         
         # Header with modern styling
-        self.results_text.insert(tk.END, f"\n{'='*110}\n", 'header')
+        self.results_text.insert(tk.END, f"\n{'='*130}\n", 'header')
         self.results_text.insert(tk.END, f"🎯 SCAN RESULTS FOR {host.upper()}\n", 'header')
-        self.results_text.insert(tk.END, f"{'='*110}\n", 'header')
-        self.results_text.insert(tk.END, f"{'PORT':<8} {'STATUS':<12} {'SERVICE':<16} {'LADDR':<16} {'ENV':<16} {'PROCESS(PID)':<24} {'PATH':<28} {'BANNER':<24}\n", 'header')
-        self.results_text.insert(tk.END, f"{'-'*110}\n", 'header')
+        self.results_text.insert(tk.END, f"{'='*130}\n", 'header')
+        self.results_text.insert(tk.END, f"{'PORT':<8} {'PROTO':<6} {'STATUS':<12} {'SERVICE':<16} {'VERSION':<20} {'CONF':<6} {'LADDR':<16} {'ENV':<12} {'PROCESS(PID)':<20} {'BANNER':<24}\n", 'header')
+        self.results_text.insert(tk.END, f"{'-'*130}\n", 'header')
         
         open_count = 0
         closed_count = 0
@@ -701,21 +738,31 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             if result.status == "OPEN" or (self.show_closed_var.get() and result.status in ["CLOSED", "FILTERED"]):
                 banner = result.banner[:24] + "..." if len(result.banner) > 24 else result.banner
                 proc_label = f"{result.process} ({result.pid})" if result.pid else (result.process or "")
-                path = result.process_path or ""
-                path_short = (path[:27] + "…") if path and len(path) > 28 else path
+                proc_label_short = (proc_label[:19] + "…") if len(proc_label) > 20 else proc_label
+                
                 addr = result.local_address or ""
                 addr_short = (addr[:15] + "…") if len(addr) > 16 else addr
+                
                 # Environment info (Docker/WSL)
                 env = ""
                 if getattr(result, 'docker_container', ""):
                     env = f"Docker:{result.docker_container}"
                 elif getattr(result, 'is_wsl', False):
                     env = f"WSL:{(result.wsl_distro or 'default')}"
-                env_short = (env[:15] + "…") if len(env) > 16 else env
+                env_short = (env[:11] + "…") if len(env) > 12 else env
+                
+                # Enhanced service info
+                service_version = getattr(result, 'service_version', '') or ''
+                version_display = service_version[:19] + "…" if len(service_version) > 20 else service_version
+                
+                confidence = getattr(result, 'confidence', 0.0) or 0.0
+                confidence_display = f"{confidence:.0%}" if confidence > 0 else "-"
+                
+                protocol_display = getattr(result, 'protocol', 'TCP')
                 
                 # Add status icons for better visual feedback
                 status_icon = "🟢" if result.status == "OPEN" else ("🔴" if result.status == "CLOSED" else "🟡")
-                line = f"{result.port:<8} {status_icon} {result.status:<10} {result.service:<16} {addr_short:<16} {env_short:<16} {proc_label:<24} {path_short:<28} {banner:<24}\n"
+                line = f"{result.port:<8} {protocol_display:<6} {status_icon} {result.status:<10} {result.service:<16} {version_display:<20} {confidence_display:<6} {addr_short:<16} {env_short:<12} {proc_label_short:<20} {banner:<24}\n"
                 
                 if result.status == "OPEN":
                     self.results_text.insert(tk.END, line, 'open')
@@ -728,7 +775,7 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                     filtered_count += 1
         
         # Enhanced summary with statistics
-        self.results_text.insert(tk.END, f"{'-'*110}\n", 'header')
+        self.results_text.insert(tk.END, f"{'-'*130}\n", 'header')
         summary = f"📊 SCAN SUMMARY:\n"
         summary += f"   • Open Ports: {open_count}\n"
         if self.show_closed_var.get():
@@ -754,16 +801,42 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             
         filename = filedialog.asksaveasfilename(
             defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv"), ("All files", "*.*")]
+            filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv"), ("HTML files", "*.html"), ("All files", "*.*")]
         )
         
         if filename:
             try:
-                format_type = "json" if filename.endswith('.json') else "csv"
+                if filename.endswith('.html'):
+                    format_type = "html"
+                elif filename.endswith('.json'):
+                    format_type = "json"
+                else:
+                    format_type = "csv"
                 self.scanner.export_results(filename, format_type)
                 messagebox.showinfo("Success", f"Results exported to {filename}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export results: {e}")
+    
+    def generate_html_report(self):
+        """Generate and save HTML report"""
+        if not self.scanner.results:
+            messagebox.showwarning("Warning", "No results to generate report!")
+            return
+            
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                report_path = self.scanner.generate_html_report(output_file=filename)
+                if report_path:
+                    messagebox.showinfo("Success", f"HTML report generated: {report_path}\n\nOpen this file in your web browser to view the professional report.")
+                else:
+                    messagebox.showerror("Error", "Failed to generate HTML report")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to generate HTML report: {e}")
 
 def main():
     """Main function to run the GUI"""
