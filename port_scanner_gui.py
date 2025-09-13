@@ -944,17 +944,31 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
             
         filename = filedialog.asksaveasfilename(
             defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv"), ("HTML files", "*.html"), ("All files", "*.*")]
+            filetypes=[
+                ("JSON files", "*.json"),
+                ("JSON (gzip)", "*.json.gz"),
+                ("CSV files", "*.csv"),
+                ("Markdown files", "*.md"),
+                ("Excel files", "*.xlsx"),
+                ("HTML files", "*.html"),
+                ("All files", "*.*")
+            ]
         )
         
         if filename:
             try:
-                if filename.endswith('.html'):
+                lower = filename.lower()
+                if lower.endswith('.html'):
                     format_type = "html"
-                elif filename.endswith('.json'):
+                elif lower.endswith('.json') or lower.endswith('.json.gz') or lower.endswith('.gz'):
                     format_type = "json"
+                elif lower.endswith('.md') or lower.endswith('.markdown'):
+                    format_type = "md"
+                elif lower.endswith('.xlsx'):
+                    format_type = "xlsx"
                 else:
                     format_type = "csv"
+                # gzip is auto-detected by export_results when filename ends with .gz/.json.gz
                 self.scanner.export_results(filename, format_type)
                 messagebox.showinfo("Success", f"Results exported to {filename}")
             except Exception as e:

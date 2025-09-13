@@ -12,7 +12,8 @@ A comprehensive, cross-platform port scanning tool designed for Windows and WSL 
 - **Profile-based scanning** (quick-dev, web-audit, full-tcp, local-deep)
 - **Hierarchical config management** with auto-discovery
 - **Network range scanning** (CIDR notation support) with bounded host concurrency
-- **Export results** to JSON/CSV formats
+- **Export results** to JSON/CSV/HTML/Markdown/XLSX formats
+- **Optional gzip compression** for large JSON exports (.json.gz)
 - **Real-time progress tracking**
 - **Comprehensive logging**
 - **Built-in common port definitions**
@@ -105,6 +106,17 @@ python port_scanner.py -H 192.168.1.0/24 -p 22,80,443 --host-concurrency 16
 # Export results to JSON
 python port_scanner.py -H localhost --common -o results.json
 
+# Export results to Markdown
+python port_scanner.py -H localhost --common -o results.md
+
+# Export results to Excel (XLSX)
+python port_scanner.py -H localhost --common -o results.xlsx
+
+# Export gzipped JSON (either extension or --gzip flag)
+python port_scanner.py -H localhost --common -o results.json.gz
+# or
+python port_scanner.py -H localhost --common -o results.json --gzip
+
 # Verbose logging with banner grabbing (banners only fetched when --banner is set)
 python port_scanner.py -H target.com -p 80,443,8080 --banner -v
 
@@ -131,7 +143,7 @@ python3 port_scanner_gui.py
 - **Advanced options**: Adjust timeout, thread count, banner grabbing
 - **Quick scan buttons**: One-click scans for common scenarios
 - **Real-time results**: Color-coded output with progress tracking
-- **Export functionality**: Save results to JSON/CSV
+- **Export functionality**: Save results to JSON/CSV/HTML/Markdown/XLSX (JSON supports gzip)
 
 ## ⚙️ Configuration System
 
@@ -289,6 +301,30 @@ Summary: 3 open ports found out of 4 scanned
 ]
 ```
 
+### Markdown Export
+
+```md
+# Scan Results
+_Generated: 2025-01-01 12:34:56_
+
+Made with loveee <3 :3
+
+| Host | Port | Proto | Status | Service | ServiceVersion | Conf | Banner | RespTime | PID | Process | LocalAddr | WSL | Docker |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| localhost | 3000 | TCP | OPEN | Node.js/Development |  | 0.90 | HTTP/1.1 200 OK | 0.023 | 12345 | node | 127.0.0.1 | no |  |
+```
+
+### Excel (XLSX) Export
+
+- Produces a `Results` worksheet with a bold, centered title: “Scan Results - Made with loveee <3 :3”.
+- Columns include: Host, Port, Protocol, Status, Service, ServiceVersion, Confidence, Banner, ResponseTime, PID, Process, ProcessPath, LocalAddress, IsWSL, WSLDistro, WSLProcess, WSLPath, DockerContainer, DockerImage, DockerContainerID.
+- Columns are auto-sized (capped) and headers are frozen for easy scrolling.
+
+### Gzipped JSON Export (.json.gz)
+
+- Use a filename ending with `.json.gz` (or `.gz`) or pass `--gzip` with a `.json` filename.
+- Useful for reducing file size for large scans.
+
 ## ⚙️ Configuration Options
 
 ### Configuration & Profile Arguments
@@ -312,7 +348,8 @@ Summary: 3 open ports found out of 4 scanned
 | `--show-closed` | Show closed/filtered ports in results | False (or from config) |
 | `--no-ping` | Skip ping sweep for network scans | False (or from config) |
 | `--udp` | Enable UDP scanning in addition to TCP | False (or from config) |
-| `-o, --output` | Export file (supports .json, .csv, .html) | None |
+| `-o, --output` | Export file (supports .json, .json.gz, .csv, .html, .md, .xlsx) | None |
+| `--gzip` | Compress JSON output (implied when `-o` ends with `.gz`) | False |
 | `-v, --verbose` | Enable verbose logging | False |
 | `--async` | Use async I/O for better performance | False |
 

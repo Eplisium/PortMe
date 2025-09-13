@@ -63,7 +63,7 @@ class ConfigurationLoader:
     }
     
     # Valid values for validation
-    VALID_OUTPUT_FORMATS = {'json', 'csv', 'html', 'none'}
+    VALID_OUTPUT_FORMATS = {'json', 'csv', 'html', 'md', 'markdown', 'xlsx', 'none'}
     VALID_LOG_LEVELS = {'DEBUG', 'INFO', 'WARNING', 'ERROR'}
     
     def __init__(self):
