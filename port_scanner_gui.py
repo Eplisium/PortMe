@@ -571,11 +571,23 @@ class PortScannerGUI:
         results_text.see(tk.END)
         
     def clear_results(self):
-        """Clear the results text area"""
+        """Clear the results text area and reset statistics"""
         if self.results_panel:
             self.results_panel.results_text.delete(1.0, tk.END)
             self.results_panel.progress_var.set("Results cleared")
         self.scanner.results = []
+        
+        # Reset statistics
+        self.scan_stats = {
+            'total_scans': 0,
+            'total_ports_scanned': 0,
+            'total_open_ports': 0,
+            'last_scan_duration': 0
+        }
+        
+        # Update stats panel to reflect reset
+        if self.stats_panel:
+            self.stats_panel.update(**self.scan_stats)
         
     def export_results(self):
         """Export results to file"""
