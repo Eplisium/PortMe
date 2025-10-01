@@ -78,10 +78,11 @@ class ThemeManager:
                        borderwidth=0, focuscolor='none', relief='flat', padding=(15, 8))
         style.map('Primary.TButton', background=[('active', self.colors['primary_dark'])])
         
-        # Success, Danger, Secondary buttons
+        # Success, Danger, Secondary, Info buttons
         for btn_type, color, active in [('Success', self.colors['success'], '#047857'),
                                          ('Danger', self.colors['danger'], '#b91c1c'),
-                                         ('Secondary', self.colors['secondary'], '#475569')]:
+                                         ('Secondary', self.colors['secondary'], '#475569'),
+                                         ('Info', self.colors['info'], '#0891b2')]:
             style.configure(f'{btn_type}.TButton', background=color, foreground='white',
                            font=('Segoe UI', 9), borderwidth=0, focuscolor='none',
                            relief='flat', padding=(12, 6))

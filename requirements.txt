@@ -25,3 +25,9 @@ openpyxl>=3.1.2         # Excel (.xlsx) export support
 # requests>=2.25.1        # For HTTP banner grabbing enhancements
 # python-nmap>=0.6.1      # For nmap integration (advanced users)
 # colorama>=0.4.4         # For colored terminal output on Windows
+
+# Phase 1 Enhancement Dependencies
+numpy<2.0,>=1.21.0        # NumPy compatibility for matplotlib
+matplotlib>=3.7.0         # Network visualization graphs
+networkx>=3.1             # Network topology and graph algorithms
+requests>=2.31.0          # CVE API lookups and HTTP requests

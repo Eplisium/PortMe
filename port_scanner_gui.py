@@ -10,6 +10,8 @@ import threading
 import queue
 import asyncio
 import time
+import os
+import webbrowser
 from port_scanner import PortScanner, ScanResult
 from config_loader import load_config, get_profile_config, list_profiles, config_loader
 from gui.components import ThemeManager
@@ -17,6 +19,9 @@ from gui.panels import (
     NavigationBar, StatisticsPanel, ProfilePanel, TargetConfigPanel,
     AdvancedOptionsPanel, ControlsPanel, QuickScanPanel, ResultsPanel, FooterPanel
 )
+# Phase 1 Enhancement imports
+from visualizer import visualize_network
+from intelligence import CVEChecker, RiskScorer, ReportGenerator
 import logging
 
 class PortScannerGUI:
@@ -50,6 +55,11 @@ class PortScannerGUI:
         self.scanner = PortScanner()
         self.scan_thread = None
         self.scan_running = False
+        
+        # Phase 1: Intelligence modules
+        self.cve_checker = CVEChecker()
+        self.risk_scorer = RiskScorer()
+        self.report_generator = ReportGenerator()
         
         # Queue for thread communication
         self.queue = queue.Queue()
@@ -265,7 +275,8 @@ class PortScannerGUI:
         
         self.controls_panel = ControlsPanel(left_inner, self.colors,
                                            self.start_scan, self.stop_scan, self.clear_results,
-                                           self.export_results, self.generate_html_report)
+                                           self.export_results, self.generate_html_report,
+                                           self.visualize_network, self.generate_enhanced_report)
         self.controls_panel.create()
         
         self.quick_scan_panel = QuickScanPanel(left_inner, self.colors,
@@ -647,6 +658,139 @@ class PortScannerGUI:
                     messagebox.showerror("Error", "Failed to generate HTML report")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to generate HTML report: {e}")
+    
+    def visualize_network(self):
+        """Generate network visualization graph (Phase 1 Feature)"""
+        if not self.scanner.results:
+            messagebox.showwarning("Warning", "No results to visualize!")
+            return
+        
+        # Filter for open ports only
+        open_results = [r for r in self.scanner.results if r.status == "OPEN"]
+        if not open_results:
+            messagebox.showwarning("Warning", "No open ports to visualize!")
+            return
+        
+        try:
+            # Show progress
+            if self.results_panel:
+                self.results_panel.progress_var.set("Generating network visualization...")
+            
+            # Generate visualizations
+            output_dir = filedialog.askdirectory(title="Select output directory for visualizations")
+            if not output_dir:
+                return
+            
+            png_path, html_path = visualize_network(open_results, output_dir)
+            
+            if self.results_panel:
+                self.results_panel.progress_var.set("Visualization complete!")
+            
+            # Ask if user wants to open
+            response = messagebox.askyesno(
+                "Visualization Complete",
+                f"Network visualizations generated:\n\n"
+                f"📊 Static Graph: {png_path}\n"
+                f"🌐 Interactive HTML: {html_path}\n\n"
+                f"Would you like to open the interactive HTML visualization?"
+            )
+            
+            if response:
+                webbrowser.open(f"file://{os.path.abspath(html_path)}")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate visualization: {e}")
+            logging.error(f"Visualization error: {e}", exc_info=True)
+    
+    def generate_enhanced_report(self):
+        """Generate enhanced markdown report with CVE detection (Phase 1 Feature)"""
+        if not self.scanner.results:
+            messagebox.showwarning("Warning", "No results to generate report!")
+            return
+        
+        try:
+            # Show progress
+            if self.results_panel:
+                self.results_panel.progress_var.set("Analyzing vulnerabilities and generating report...")
+            
+            # Enrich results with CVE data
+            for result in self.scanner.results:
+                if result.status != "OPEN":
+                    continue
+                
+                # Check for vulnerabilities
+                cves = self.cve_checker.check_vulnerabilities(
+                    service=result.service,
+                    version=result.service_version,
+                    banner=result.banner,
+                    use_online=False  # Default to offline, can be made configurable
+                )
+                
+                # Attach CVE data to result
+                result.cves = cves
+                
+                # Perform risk assessment
+                assessment = self.risk_scorer.assess_service(
+                    service=result.service,
+                    port=result.port,
+                    version=result.service_version,
+                    cves=cves,
+                    banner=result.banner
+                )
+                
+                # Attach risk data
+                result.risk_level = assessment.risk_level
+                result.risk_score = assessment.risk_score
+            
+            # Perform host-level assessment
+            host_assessment = self.risk_scorer.assess_host(self.scanner.results)
+            
+            # Prepare scan info
+            scan_info = {
+                'target': self.target_panel.host_var.get() if self.target_panel else 'Unknown',
+                'ports_scanned': len(self.scanner.results),
+                'open_ports': len([r for r in self.scanner.results if r.status == "OPEN"]),
+                'duration': f"{self.scan_stats.get('last_scan_duration', 0):.1f}s"
+            }
+            
+            # Generate report
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".md",
+                filetypes=[("Markdown files", "*.md"), ("All files", "*.*")]
+            )
+            
+            if not filename:
+                return
+            
+            report_content = self.report_generator.generate_report(
+                results=self.scanner.results,
+                host_assessment=host_assessment,
+                scan_info=scan_info,
+                output_path=filename
+            )
+            
+            if self.results_panel:
+                self.results_panel.progress_var.set("Enhanced report generated!")
+            
+            # Show summary
+            risk_emoji = self.risk_scorer.get_risk_emoji(host_assessment['risk_level'])
+            messagebox.showinfo(
+                "Report Generated",
+                f"Enhanced Security Report Generated!\n\n"
+                f"{risk_emoji} Risk Level: {host_assessment['risk_level'].upper()}\n"
+                f"📊 Total CVEs Found: {host_assessment.get('total_cves', 0)}\n"
+                f"🔴 Critical Services: {len(host_assessment.get('critical_services', []))}\n"
+                f"📄 Report saved to: {filename}\n\n"
+                f"The report includes:\n"
+                f"• Executive Summary\n"
+                f"• Risk Assessment\n"
+                f"• Security Recommendations\n"
+                f"• Detailed Vulnerability Analysis"
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate enhanced report: {e}")
+            logging.error(f"Enhanced report error: {e}", exc_info=True)
 
 def main():
     """Main function to run the GUI"""

@@ -275,13 +275,16 @@ class ControlsPanel(BaseComponent):
     
     def __init__(self, parent, colors: Dict[str, str], 
                  on_start: Callable, on_stop: Callable, on_clear: Callable,
-                 on_export: Callable, on_html_report: Callable):
+                 on_export: Callable, on_html_report: Callable, 
+                 on_visualize: Callable = None, on_enhanced_report: Callable = None):
         super().__init__(parent, colors)
         self.on_start = on_start
         self.on_stop = on_stop
         self.on_clear = on_clear
         self.on_export = on_export
         self.on_html_report = on_html_report
+        self.on_visualize = on_visualize
+        self.on_enhanced_report = on_enhanced_report
         self.scan_button = None
         self.stop_button = None
     
@@ -311,6 +314,15 @@ class ControlsPanel(BaseComponent):
         
         ttk.Button(button_grid, text="📄 Generate HTML Report", 
                   command=self.on_html_report, style='Success.TButton').pack(fill=tk.X, pady=2)
+        
+        # Phase 1 Enhancement Buttons
+        if self.on_visualize:
+            ttk.Button(button_grid, text="🎨 Visualize Network", 
+                      command=self.on_visualize, style='Info.TButton').pack(fill=tk.X, pady=2)
+        
+        if self.on_enhanced_report:
+            ttk.Button(button_grid, text="📊 Enhanced Report (CVE)", 
+                      command=self.on_enhanced_report, style='Info.TButton').pack(fill=tk.X, pady=2)
         
         self.container = controls_section
         return controls_section
