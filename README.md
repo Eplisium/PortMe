@@ -136,6 +136,8 @@ python3 port_scanner_gui.py
 ```
 
 #### GUI Features
+- **Modern Interface**: Beautiful dark/light theme support with smooth transitions
+- **Statistics Dashboard**: Real-time tracking of total scans, open ports, and performance metrics
 - **Profile management**: Dropdown to select configuration profiles
 - **Configuration reload**: 🔄 button to refresh configuration without restart
 - **Target configuration**: Enter hostname or IP address (auto-populated from profiles)
@@ -144,6 +146,9 @@ python3 port_scanner_gui.py
 - **Quick scan buttons**: One-click scans for common scenarios
 - **Real-time results**: Color-coded output with progress tracking
 - **Export functionality**: Save results to JSON/CSV/HTML/Markdown/XLSX (JSON supports gzip)
+- **Keyboard Shortcuts**: Fast navigation with Ctrl+S (Start), Ctrl+Q (Stop), Ctrl+E (Export), Ctrl+T (Theme Toggle)
+- **Toast Notifications**: Non-intrusive status updates
+- **Responsive Design**: Adapts to window resizing with flexible layouts
 
 ## ⚙️ Configuration System
 

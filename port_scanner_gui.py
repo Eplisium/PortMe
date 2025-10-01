@@ -18,23 +18,60 @@ class PortScannerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("🔍 Advanced Port Scanner")
-        self.root.geometry("1000x750")
-        self.root.minsize(800, 600)  # Set minimum window size
+        self.root.geometry("1200x850")
+        self.root.minsize(1000, 700)  # Set minimum window size
         self.root.resizable(True, True)
         
-        # Modern color scheme
-        self.colors = {
-            'primary': '#2563eb',      # Blue
-            'primary_dark': '#1d4ed8', # Darker blue
-            'secondary': '#64748b',     # Gray
-            'success': '#059669',       # Green
-            'danger': '#dc2626',        # Red
-            'warning': '#d97706',       # Orange
-            'background': '#f8fafc',    # Light gray
-            'surface': '#ffffff',       # White
-            'text': '#1e293b',          # Dark gray
-            'text_light': '#64748b',    # Light gray
-            'border': '#e2e8f0'         # Border gray
+        # Enhanced color schemes with theme support
+        self.themes = {
+            'light': {
+                'primary': '#3b82f6',      # Blue
+                'primary_dark': '#2563eb', # Darker blue
+                'primary_light': '#60a5fa', # Lighter blue
+                'secondary': '#64748b',     # Gray
+                'success': '#10b981',       # Green
+                'danger': '#ef4444',        # Red
+                'warning': '#f59e0b',       # Orange
+                'info': '#06b6d4',          # Cyan
+                'background': '#f8fafc',    # Light gray
+                'surface': '#ffffff',       # White
+                'text': '#1e293b',          # Dark gray
+                'text_light': '#64748b',    # Light gray
+                'text_muted': '#94a3b8',    # Muted gray
+                'border': '#e2e8f0',        # Border gray
+                'hover': '#f1f5f9',         # Hover gray
+                'accent': '#8b5cf6'         # Purple accent
+            },
+            'dark': {
+                'primary': '#3b82f6',
+                'primary_dark': '#1e40af',
+                'primary_light': '#60a5fa',
+                'secondary': '#94a3b8',
+                'success': '#10b981',
+                'danger': '#ef4444',
+                'warning': '#f59e0b',
+                'info': '#06b6d4',
+                'background': '#0f172a',
+                'surface': '#1e293b',
+                'text': '#f8fafc',
+                'text_light': '#cbd5e1',
+                'text_muted': '#94a3b8',
+                'border': '#334155',
+                'hover': '#334155',
+                'accent': '#a78bfa'
+            }
+        }
+        
+        # Current theme
+        self.current_theme = 'light'
+        self.colors = self.themes[self.current_theme]
+        
+        # Statistics tracking
+        self.scan_stats = {
+            'total_scans': 0,
+            'total_ports_scanned': 0,
+            'total_open_ports': 0,
+            'last_scan_duration': 0
         }
         
         # Set window background
@@ -59,6 +96,56 @@ class PortScannerGUI:
         
         # Start queue processing
         self.process_queue()
+        
+        # Setup keyboard shortcuts
+        self.setup_keyboard_shortcuts()
+    
+    def setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts for better UX"""
+        self.root.bind('<Control-s>', lambda e: self.start_scan() if self.scan_button['state'] != 'disabled' else None)
+        self.root.bind('<Control-q>', lambda e: self.stop_scan())
+        self.root.bind('<Control-e>', lambda e: self.export_results())
+        self.root.bind('<Control-l>', lambda e: self.clear_results())
+        self.root.bind('<F5>', lambda e: self.reload_configuration())
+        self.root.bind('<Control-t>', lambda e: self.toggle_theme())
+    
+    def toggle_theme(self):
+        """Toggle between light and dark themes"""
+        self.current_theme = 'dark' if self.current_theme == 'light' else 'light'
+        self.colors = self.themes[self.current_theme]
+        
+        # Show notification
+        theme_name = "Dark" if self.current_theme == 'dark' else "Light"
+        
+        # Recreate UI with new theme
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        
+        self.setup_styles()
+        self.create_widgets()
+        
+        # Show brief notification
+        self.progress_var.set(f"Switched to {theme_name} theme")
+    
+    def show_toast_notification(self, message, duration=3000):
+        """Show a temporary toast notification"""
+        toast = tk.Toplevel(self.root)
+        toast.overrideredirect(True)
+        toast.configure(bg=self.colors['primary'])
+        toast.attributes('-alpha', 0.95)
+        toast.attributes('-topmost', True)
+        
+        # Position at top-right
+        x = self.root.winfo_x() + self.root.winfo_width() - 320
+        y = self.root.winfo_y() + 20
+        toast.geometry(f"300x60+{x}+{y}")
+        
+        tk.Label(toast, text=message, font=('Segoe UI', 10, 'bold'),
+                fg='white', bg=self.colors['primary'],
+                wraplength=280, padx=15, pady=15).pack()
+        
+        # Fade in effect (simplified)
+        toast.after(duration, toast.destroy)
     
     def load_configuration(self):
         """Load configuration and profiles"""
@@ -270,61 +357,95 @@ class PortScannerGUI:
         main_container = tk.Frame(self.root, bg=self.colors['background'])
         main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
         
-        # Header section
-        header_frame = tk.Frame(main_container, bg=self.colors['background'])
-        header_frame.pack(fill=tk.X, pady=(0, 20))
+        # Top navigation bar
+        nav_bar = tk.Frame(main_container, bg=self.colors['primary'], height=60)
+        nav_bar.pack(fill=tk.X, pady=(0, 15))
+        nav_bar.pack_propagate(False)
         
-        title_label = tk.Label(header_frame, 
-                              text="🔍 Advanced Port Scanner", 
-                              font=('Segoe UI', 18, 'bold'),
-                              fg=self.colors['primary'],
-                              bg=self.colors['background'])
-        title_label.pack(side=tk.LEFT)
+        # Nav left side
+        nav_left = tk.Frame(nav_bar, bg=self.colors['primary'])
+        nav_left.pack(side=tk.LEFT, fill=tk.Y, padx=20)
         
-        subtitle_label = tk.Label(header_frame,
-                                 text="Network Security & Diagnostics Tool",
-                                 font=('Segoe UI', 10),
-                                 fg=self.colors['text_light'],
-                                 bg=self.colors['background'])
-        subtitle_label.pack(side=tk.LEFT, padx=(10, 0))
+        tk.Label(nav_left, 
+                text="🔍 ADVANCED PORT SCANNER", 
+                font=('Segoe UI', 14, 'bold'),
+                fg='white',
+                bg=self.colors['primary']).pack(side=tk.LEFT, pady=15)
         
-        # Right-aligned header area: message + cursive signature
-        right_header = tk.Frame(header_frame, bg=self.colors['background'])
-        right_header.pack(side=tk.RIGHT)
+        # Version badge
+        version_frame = tk.Frame(nav_left, bg=self.colors['primary_dark'], bd=1, relief='solid')
+        version_frame.pack(side=tk.LEFT, padx=(12, 0))
+        tk.Label(version_frame,
+                text="v2.0 Enhanced",
+                font=('Segoe UI', 8, 'bold'),
+                fg='white',
+                bg=self.colors['primary_dark'],
+                padx=8, pady=3).pack()
         
-        made_with_label = tk.Label(
-            right_header,
-            text="Made with 💜 for Windows and WSL users.",
-            font=('Segoe UI', 9),
-            fg=self.colors['text_light'],
-            bg=self.colors['background']
-        )
-        made_with_label.pack(anchor=tk.E)
+        # Nav right side with theme toggle
+        nav_right = tk.Frame(nav_bar, bg=self.colors['primary'])
+        nav_right.pack(side=tk.RIGHT, fill=tk.Y, padx=20)
         
-        # Pick a nice cursive/script font available on Windows; fall back gracefully
-        available_fonts = {name.lower(): name for name in tkfont.families()}
-        script_candidates = [
-            "Segoe Script", "Lucida Handwriting", "Brush Script MT",
-            "Edwardian Script ITC", "Gabriola", "Kunstler Script",
-            "Freestyle Script"
+        # Theme toggle button
+        theme_icon = "🌙" if self.current_theme == 'light' else "☀️"
+        theme_btn = tk.Button(nav_right,
+                             text=theme_icon,
+                             font=('Segoe UI', 12),
+                             bg=self.colors['primary_dark'],
+                             fg='white',
+                             bd=0,
+                             padx=12,
+                             pady=8,
+                             cursor='hand2',
+                             command=self.toggle_theme,
+                             activebackground=self.colors['primary_light'],
+                             activeforeground='white')
+        theme_btn.pack(side=tk.RIGHT, pady=12)
+        
+        # Keyboard shortcuts hint
+        tk.Label(nav_right,
+                text="Ctrl+T",
+                font=('Segoe UI', 7),
+                fg='#e0e0e0',
+                bg=self.colors['primary']).pack(side=tk.RIGHT, padx=(0, 5))
+        
+        # Statistics Dashboard
+        stats_frame = tk.Frame(main_container, bg=self.colors['background'])
+        stats_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Create stat cards
+        stats_data = [
+            ("📊 Total Scans", "total_scans", self.colors['primary']),
+            ("🔓 Open Ports", "total_open_ports", self.colors['success']),
+            ("📈 Ports Scanned", "total_ports_scanned", self.colors['info']),
+            ("⏱️ Last Duration", "last_scan_duration", self.colors['accent'])
         ]
-        script_font_name = None
-        for candidate in script_candidates:
-            if candidate.lower() in available_fonts:
-                script_font_name = available_fonts[candidate.lower()]
-                break
-        if not script_font_name:
-            script_font_name = "Segoe UI"
-        script_font = (script_font_name, 14, 'italic')
         
-        signature_label = tk.Label(
-            right_header,
-            text="Devd by Eplisium",
-            font=script_font,
-            fg=self.colors['primary_dark'],
-            bg=self.colors['background']
-        )
-        signature_label.pack(anchor=tk.E)
+        self.stat_labels = {}
+        for i, (title, key, color) in enumerate(stats_data):
+            stat_card = tk.Frame(stats_frame, bg=self.colors['surface'], relief='flat', bd=0, height=90)
+            stat_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0 if i == 0 else 7, 0))
+            
+            # Color indicator
+            tk.Frame(stat_card, bg=color, height=4).pack(fill=tk.X)
+            
+            # Content
+            content = tk.Frame(stat_card, bg=self.colors['surface'])
+            content.pack(fill=tk.BOTH, expand=True, padx=15, pady=12)
+            
+            tk.Label(content,
+                    text=title,
+                    font=('Segoe UI', 9),
+                    fg=self.colors['text_muted'],
+                    bg=self.colors['surface']).pack(anchor=tk.W)
+            
+            value_label = tk.Label(content,
+                                  text=self.format_stat_value(key, 0),
+                                  font=('Segoe UI', 20, 'bold'),
+                                  fg=self.colors['text'],
+                                  bg=self.colors['surface'])
+            value_label.pack(anchor=tk.W, pady=(5, 0))
+            self.stat_labels[key] = value_label
         
         # Main content frame with responsive sizing
         content_frame = tk.Frame(main_container, bg=self.colors['background'])
@@ -661,6 +782,53 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
         
         self.results_text.insert(tk.END, welcome_msg, 'info')
         
+        # Footer with shortcuts and credits
+        footer = tk.Frame(main_container, bg=self.colors['surface'], height=45)
+        footer.pack(fill=tk.X, pady=(10, 0))
+        footer.pack_propagate(False)
+        
+        # Left side - shortcuts
+        footer_left = tk.Frame(footer, bg=self.colors['surface'])
+        footer_left.pack(side=tk.LEFT, padx=20, pady=10)
+        
+        shortcuts = "⌨️ Shortcuts: Ctrl+S (Start) | Ctrl+Q (Stop) | Ctrl+E (Export) | Ctrl+L (Clear) | Ctrl+T (Theme) | F5 (Reload)"
+        tk.Label(footer_left,
+                text=shortcuts,
+                font=('Segoe UI', 8),
+                fg=self.colors['text_muted'],
+                bg=self.colors['surface']).pack(side=tk.LEFT)
+        
+        # Right side - signature
+        footer_right = tk.Frame(footer, bg=self.colors['surface'])
+        footer_right.pack(side=tk.RIGHT, padx=20, pady=10)
+        
+        tk.Label(footer_right,
+                text="Made with 💜 by Eplisium",
+                font=('Segoe UI', 9, 'italic'),
+                fg=self.colors['accent'],
+                bg=self.colors['surface']).pack(side=tk.RIGHT)
+        
+    def format_stat_value(self, key, value):
+        """Format stat value for display"""
+        if key == "last_scan_duration":
+            if value == 0:
+                return "0.0s"
+            return f"{value:.1f}s"
+        return str(value)
+    
+    def update_statistics(self, open_count, total_scanned, duration):
+        """Update statistics after a scan"""
+        self.scan_stats['total_scans'] += 1
+        self.scan_stats['total_ports_scanned'] += total_scanned
+        self.scan_stats['total_open_ports'] += open_count
+        self.scan_stats['last_scan_duration'] = duration
+        
+        # Update UI labels if they exist
+        if hasattr(self, 'stat_labels'):
+            for key, value in self.scan_stats.items():
+                if key in self.stat_labels:
+                    self.stat_labels[key].config(text=self.format_stat_value(key, value))
+    
     def on_port_option_change(self, *args):
         """Handle port option radio button changes"""
         if self.port_option.get() == "custom":
@@ -765,6 +933,9 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
     def scan_worker(self, host, ports):
         """Worker thread for scanning"""
         try:
+            import time
+            scan_start_time = time.time()
+            
             self.queue.put(("status", f"Starting scan of {host} on {len(ports)} ports..."))
             
             # Clear previous results
@@ -794,10 +965,20 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                 else:
                     results = self.scanner.scan_host_ports(host, ports, protocols, show_progress=False, progress_callback=progress_cb)
                 self.queue.put(("results", host, results))
+            
+            # Calculate scan duration and update stats
+            scan_duration = time.time() - scan_start_time
+            
+            # Count open ports
+            open_count = sum(1 for r in self.scanner.results if r.status == "OPEN")
+            total_scanned = len(self.scanner.results)
+            
+            # Update statistics
+            self.queue.put(("stats", open_count, total_scanned, scan_duration))
                 
             # Only mark complete if not cancelled
             if not self.scanner.is_cancelled():
-                self.queue.put(("complete", "Scan completed successfully!"))
+                self.queue.put(("complete", f"Scan completed in {scan_duration:.1f}s! Found {open_count} open ports."))
             else:
                 self.queue.put(("stopped", "Scan stopped by user"))
             
@@ -826,6 +1007,9 @@ Ready to scan! Click 'Start Scan' or use a Quick Scan button."""
                     self.progress_var.set(message[1])
                 elif message[0] == "results":
                     self.display_results(message[1], message[2])
+                elif message[0] == "stats":
+                    open_count, total_scanned, duration = message[1], message[2], message[3]
+                    self.update_statistics(open_count, total_scanned, duration)
                 elif message[0] == "progress":
                     completed, total = message[1], message[2]
                     if self.scanner.is_cancelled():
